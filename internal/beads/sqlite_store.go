@@ -1178,7 +1178,7 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 		setBeadStatus(&b, *opts.Status)
 	}
 	if wasClosed && b.Status != "closed" {
-		forgetCloseReason(&b)
+		dropCloseReasonMetadata(&b)
 	}
 	if opts.Type != nil {
 		b.Type = *opts.Type
@@ -1336,7 +1336,13 @@ func (s *SQLiteStore) Reopen(id string) error {
 		return nil
 	}
 	status := "open"
-	return s.Update(id, UpdateOpts{Status: &status})
+	opts := UpdateOpts{Status: &status}
+	if _, ok := b.Metadata[closeReasonMetadataKey]; ok {
+		// The old close's reason must not feed the next close
+		// (dropCloseReasonMetadata).
+		opts.Metadata = map[string]string{closeReasonMetadataKey: ""}
+	}
+	return s.Update(id, opts)
 }
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.
