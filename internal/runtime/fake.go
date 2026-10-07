@@ -294,7 +294,7 @@ func (f *Fake) ResetInterruptedTurn(_ context.Context, name string) error {
 }
 
 // WaitForInterruptBoundary records the call and returns the configured result.
-func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since time.Time, timeout time.Duration) error {
+func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since time.Time, timeout time.Duration, _ ...string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{

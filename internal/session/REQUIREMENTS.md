@@ -175,6 +175,8 @@ unless the row names how they map to the canonical projection.
 | SESSION-RUNTIME-008 | Retired SQLite session-ledger recovery | The enabled supervisor may supplement its one historical snapshot from the exact retired `<city>/.gc/store/sessions.db` ledger. It never SQLite-opens the deployed database: the composition root reads a descriptor-pinned, byte-proven private copy only after proving authoritative WAL/journal content absent, validates the exact deployed v1 schema, and fails the legacy source closed on movement or malformed rows. The active session store wins exact ID collisions; a missing retired ledger is a no-op. | `internal/storebinding/sqlite/legacy_sessions_snapshot_unix.go`; `internal/storebinding/sqlite/legacy_sessions_snapshot_unix_test.go`; `internal/session/transcript_meta_legacy_test.go`; `cmd/gc/transcriptmeta_reconcile.go`; `ga-ssvfi` |
 | SESSION-RUNTIME-009 | Runtime uncertainty defers lifecycle mutation | A runtime observation that wraps `ErrRuntimeUnavailable` remains unknown through session and worker handles. Reconciliation must not derive absence, detachment, or inactivity from that result: pending creation and wake-failure budgets remain intact; close/heal, pool sweep, drain completion, detached-at, idle/no-wake drain, and config-drift restart defer until a healthy observation. Confirmed empty observations retain the ordinary absence/convergence path, and non-sentinel legacy activity errors remain best-effort. | `internal/session/manager_test.go` `TestObserveRuntimeForInfoPreservesObservationUncertainty`; `internal/worker/handle_test.go` `TestRuntimeHandleLiveObservationPreservesObservationUncertainty`; `cmd/gc/session_lifecycle_start_boundary_test.go`; `cmd/gc/city_runtime_test.go`; `cmd/gc/session_wake_test.go`; `cmd/gc/session_observation_uncertainty_test.go`; `cmd/gc/session_reconciler_trace_test.go` `TestReconcileOrphanCloseFailsClosedOnLivenessError` |
 
+| SESSION-RUNTIME-010 | Runtime proves message delivery but misses the busy transition | Treat delivery as successful, retain the observation diagnostic, and never resend. This does not establish turn completion. An uncertain or failed delivery still returns an error. The shared session path applies to API and CLI callers. | `internal/session/chat_test.go` `TestNudgeSessionProvenDeliveryDoesNotFailOrResend`; `internal/session/chat.go` |
+
 ## Maintenance Rules
 
 - Add one row per behavior scenario, not one paragraph per file.
@@ -182,3 +184,29 @@ unless the row names how they map to the canonical projection.
 - Keep evidence current. If a cited test is deleted, move or replace the row.
 - Do not use this document as a scratchpad for implementation plans. Capture
   durable requirements, invariants, scenario outcomes, and proof only.
+
+### Transcript attribution
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-HISTORY-001 | A new Claude session has a known native key but its transcript has not been written | Return absent history; do not substitute an older same-workdir transcript. Once the keyed file appears, return that exact file. Preserve the key through provider-specific fallback rules. | `manager_test.go:TestTranscriptPathWaitsForKnownClaudeKey`; reproduced city BB startup baseline matched all 33 entries of a different session |
+
+### Manual conversation runtime loss
+
+| Scenario | Required behavior | Evidence |
+| --- | --- | --- |
+| SESSION-LIFE-MANUAL-LOSS | When a runtime disappears after a manual conversation successfully started, healing retains its provider session key, start configuration and priming identity. Never-started manual sessions and automatic pool sessions retain existing recovery behavior. The pre-boot reaper recognizes the API manual origin and keeps the bead open. Wake-failure and churn accounting preserve that identity too; counters and quarantine remain active. Explicit reset remains a separate operation. | `TestPreserveConversationOnRuntimeLoss`, `TestHealStatePatch_ManualRuntimeLossRetainsStartedConversation`, `TestRecordFailure_ManualConversationKeepsIdentityAndAccrues`, `TestCleanupDeadRuntimeSessionCorpsesSkipsUnreapableStatesAndTransports`, real VM reboot identity/history assertions |
+
+### Codex interrupt acknowledgement
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-STOP-CODEX-ID | Concurrent Codex conversations share a native home | Stop confirmation carries the session's stored native key, reads only that transcript, and accepts a current native `turn_aborted` event. An older abort or another session's log cannot acknowledge this stop. Missing native identity fails visibly. | `internal/runtime/tmux/tmux_test.go:TestCodexTranscriptTailContainsTurnAborted`; `TestWaitForCodexInterruptBoundary`; live BB qualification |
+
+### Standalone conversation qualification
+
+| ID | Required behavior | Evidence |
+| --- | --- | --- |
+| SESSION-FRESH-FAIL-PERMISSIONS | A failed fresh launch without a native resume key must report the original failure, never retry a stored command that discards permission overrides. | `TestStartRuntimeOnly_FailedFreshLaunchDoesNotFallBackToUnrestrictedStoredCommand` |
+| SESSION-CODEX-COMMAND-APPROVAL | Codex command approvals are exposed through pending/respond, answered once by label, and prevent prompt delivery while pending. Historical menu text is not actionable. | `TestParseApprovalPrompt_CodexCommand` |
+| SESSION-MANUAL-REAP-RESUME | Stale creating cleanup must retain a committed manual conversation being resumed; never-started and automatic worker cleanup remain unchanged. | `TestReapStaleSessionBeadsRetainsStartedManualConversation` |

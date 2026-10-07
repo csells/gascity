@@ -325,7 +325,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
 		PermissionModes: map[string]string{
-			"suggest":      "--ask-for-approval untrusted --sandbox read-only",
+			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
 			"unrestricted": "--dangerously-bypass-approvals-and-sandbox",
 		},
@@ -336,7 +336,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:    "select",
 				Default: "unrestricted",
 				Choices: []BuiltinOptionChoice{
-					{Value: "suggest", Label: "Suggest (ask for approval)", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+					{Value: "suggest", Label: "Suggest (ask for approval)", FlagArgs: []string{"--ask-for-approval", "on-request", "--sandbox", "read-only"}},
 					{Value: "auto-edit", Label: "Full auto (sandboxed)", FlagArgs: []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"}},
 					{Value: "unrestricted", Label: "Bypass all (no sandbox)", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
 				},

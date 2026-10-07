@@ -519,3 +519,23 @@ func TestCodexAutoEditMapsToUnremovedCLIFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexSuggestUsesSupportedApprovalPolicy(t *testing.T) {
+	spec := BuiltinProviders()["codex"]
+	if got := spec.PermissionModes["suggest"]; got != "--ask-for-approval on-request --sandbox read-only" {
+		t.Fatalf("unsupported suggest policy: %q", got)
+	}
+	for _, option := range spec.OptionsSchema {
+		if option.Key == "permission_mode" {
+			for _, choice := range option.Choices {
+				if choice.Value == "suggest" {
+					if len(choice.FlagArgs) != 4 || choice.FlagArgs[1] != "on-request" {
+						t.Fatalf("unsupported suggest schema: %q", choice.FlagArgs)
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("suggest option missing")
+}

@@ -314,7 +314,7 @@ func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Be
 	if !ok {
 		return nil
 	}
-	if err := waiter.WaitForInterruptBoundary(ctx, sessName, since, interruptBoundaryWait); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+	if err := waiter.WaitForInterruptBoundary(ctx, sessName, since, interruptBoundaryWait, b.Metadata["session_key"]); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		return fmt.Errorf("waiting for interrupt boundary: %w", err)
 	}
 	return nil

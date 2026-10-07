@@ -610,8 +610,8 @@ func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow ti
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
 // before the next user turn is injected.
-func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
-	return p.tm.WaitForInterruptBoundary(ctx, name, since, timeout)
+func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration, sessionKey ...string) error {
+	return p.tm.WaitForInterruptBoundary(ctx, name, since, timeout, sessionKey...)
 }
 
 // ResetInterruptedTurn discards the just-interrupted Gemini user turn without

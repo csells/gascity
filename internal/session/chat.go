@@ -322,6 +322,13 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// dead remain-on-exit pane lingered because we returned before
 	// killExistingOrphans. If even the generic strip finds nothing, the
 	// command carries no resume flag and is itself a fresh-start command.
+	// A failed fresh launch is not evidence of a stale resume key. In
+	// particular, falling back to the stored command here can erase explicit
+	// permission restrictions when a provider rejects a new CLI option.
+	if sessionKey == "" && freshCmd == resumeCommand &&
+		stripResumeFlagArg(resumeCommand, resumeFlag, b.Metadata["resume_style"]) == resumeCommand {
+		return false, nil
+	}
 	if resumeFlag != "" && freshCmd == resumeCommand {
 		// With no key on the bead there is nothing a command could have diverged
 		// from, and the decline below returns without starting anything, so the
@@ -843,6 +850,10 @@ func formatWaitIdleReminder(source, message string) string {
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
 	err := m.nudgeContent(sessName, content, immediate)
+	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+		log.Printf("session %q: message delivery proven; busy transition unobserved: %v", sessName, err)
+		err = nil
+	}
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
@@ -1319,7 +1330,7 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
-	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
+	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -168,3 +169,28 @@ func TestBuildPreparedStart_ExplicitEffortOverrideWinsOverDispatchOption(t *test
 }
 
 func ptrString(s string) *string { return &s }
+
+func TestBuildPreparedStart_CodexPermissionOverrideSurvivesCustomResume(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprint(resume), func(t *testing.T) {
+			rp := codexEffortResolvedProvider()
+			rp.Command = "codex --dangerously-bypass-hook-trust"
+			rp.ResumeCommand = "codex --dangerously-bypass-hook-trust resume {{.SessionKey}} --dangerously-bypass-approvals-and-sandbox --model gpt-6-luna -c model_reasoning_effort=medium"
+			rp.EffectiveDefaults["model"] = "gpt-6-luna"
+			rp.EffectiveDefaults["effort"] = "medium"
+			candidate, cfg, store := newOptionSessionWithWork(t, rp, "codex --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --model gpt-6-luna -c model_reasoning_effort=medium", nil)
+			candidate.info.TemplateOverrides = `{"effort":"medium","permission_mode":"suggest"}`
+			if resume {
+				candidate.info.SessionKey = "native-key"
+				candidate.info.StartedConfigHash = "started"
+			}
+			prepared, _, err := buildPreparedStart(candidate, cfg, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(prepared.cfg.Command, "--dangerously-bypass-approvals-and-sandbox") || !strings.Contains(prepared.cfg.Command, "--ask-for-approval on-request --sandbox read-only") {
+				t.Fatalf("lost permission override: %s", prepared.cfg.Command)
+			}
+		})
+	}
+}

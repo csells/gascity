@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// ErrNudgeDeliveredUnobserved reports proven message delivery without an observed busy transition.
+// Callers must not resend the message. Completion must be observed separately.
+var ErrNudgeDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+
 // ErrSessionExists reports that the runtime already has a live session with the
 // requested name.
 var ErrSessionExists = errors.New("session already exists")
@@ -553,7 +557,7 @@ type InputClearProvider interface {
 // actually been canceled. Waiting for that marker avoids racing a replacement
 // prompt into a session that still intends to finish the interrupted turn.
 type InterruptBoundaryWaitProvider interface {
-	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
+	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration, sessionKey ...string) error
 }
 
 // RelaunchProvider is an optional extension for runtimes that can re-launch the

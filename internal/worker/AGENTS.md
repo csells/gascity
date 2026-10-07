@@ -28,3 +28,10 @@ sessionlog read-site inventory; stream and transcript readers in
 Package-internal helpers in `internal/session/` may construct and use
 `session.Manager`; tests may construct it directly. Do not add new non-test
 direct `session.Manager.CreateSession` call sites outside the worker boundary.
+
+## History identity
+
+`HistorySnapshot.GCSessionID` is the durable Gas City session bead ID. Native
+resume-key discovery/persistence must not replace it or the caller's logical
+conversation ID. Provider identity stays in `ProviderSessionID`; a late hook
+must not make an unchanged transcript appear to be a different stream.

@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -531,5 +533,32 @@ func TestResumeInjectsSSHKeepalive(t *testing.T) {
 				t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", cfg.Env["GIT_SSH_COMMAND"])
 			}
 		})
+	}
+}
+
+func TestNudgeSessionProvenDeliveryDoesNotFailOrResend(t *testing.T) {
+	for _, immediate := range []bool{false, true} {
+		for _, tc := range []struct {
+			name      string
+			cause     error
+			wantError bool
+		}{
+			{"confirmed", nil, false},
+			{"delivered_without_busy", fmt.Errorf("runtime observation: %w", runtime.ErrNudgeDeliveredUnobserved), false},
+			{"uncertain", errors.New("submit not confirmed"), true},
+		} {
+			t.Run(fmt.Sprintf("%s/immediate=%t", tc.name, immediate), func(t *testing.T) {
+				sp := runtime.NewFake()
+				sp.NudgeErrors = map[string]error{"session": tc.cause}
+				m := &Manager{sp: sp}
+				err := m.nudgeSession(context.Background(), "session", "Heya!", immediate)
+				if (err != nil) != tc.wantError {
+					t.Fatalf("nudgeSession error = %v, wantError=%t", err, tc.wantError)
+				}
+				if len(sp.Calls) != 1 {
+					t.Fatalf("delivery calls = %d, want one; never resend", len(sp.Calls))
+				}
+			})
+		}
 	}
 }

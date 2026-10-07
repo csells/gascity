@@ -281,3 +281,24 @@ func TestEnsureRunning_EmptySessionKeyStripsDivergedSessionIDAndStartsFresh(t *t
 		t.Errorf("relaunch = %q, want the bare start command %q", relaunch, "claude --dangerously")
 	}
 }
+
+func TestStartRuntimeOnly_FailedFreshLaunchDoesNotFallBackToUnrestrictedStoredCommand(t *testing.T) {
+	mgr, sp, info, _ := newSuspendedResumableSession(t)
+	for k, v := range map[string]string{"resume_flag": "resume", "resume_style": "subcommand", "resume_command": "codex resume {{.SessionKey}}", "command": "codex --dangerously-bypass-approvals-and-sandbox"} {
+		if err := mgr.store.SetMetadata(info.ID, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedRecoveryMetadata(t, mgr, info.ID)
+	sp.commands = nil
+	sp.armed = true
+	command := "codex --ask-for-approval untrusted --sandbox read-only"
+	err := mgr.StartRuntimeOnly(context.Background(), info.ID, command, runtime.Config{WorkDir: "/tmp"})
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("expected original failed fresh launch, got %v; commands %q", err, sp.commands)
+	}
+	if len(sp.commands) != 1 || sp.commands[0] != command {
+		t.Fatalf("must never retry fresh launch with different permissions: %q", sp.commands)
+	}
+	assertRecoveryMetadataUntouched(t, mgr, info.ID)
+}

@@ -4,6 +4,7 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -237,7 +238,7 @@ var (
 	// session already received, which is the ga-civwyz duplicate-reminder
 	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
 	// days of production logs).
-	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+	ErrNudgeSubmitDeliveredUnobserved = runtime.ErrNudgeDeliveredUnobserved
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -2199,7 +2200,8 @@ func nextPasteBufferName() string {
 }
 
 func (t *Tmux) sendLiteralText(target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
+	// Multiline input must arrive as one paste, even below the size limit.
+	if len(text) > maxSendKeysLiteralLen || strings.ContainsAny(text, "\r\n") {
 		return t.pasteLiteralText(target, text)
 	}
 	_, err := t.run("send-keys", "-t", paneTarget(target), "-l", text)
@@ -4615,7 +4617,7 @@ func waitForIdlePoll(ctx context.Context) error {
 
 // WaitForInterruptBoundary waits for a provider-native interrupt
 // acknowledgement before the next user turn is injected.
-func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
+func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration, sessionKey ...string) error {
 	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
 	switch strings.TrimSpace(provider) {
 	case "", "codex":
@@ -4635,19 +4637,22 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 	if codexHome == "" {
 		return runtime.ErrInteractionUnsupported
 	}
-	return waitForCodexInterruptBoundary(ctx, codexHome, since, timeout)
+	if len(sessionKey) == 0 || strings.TrimSpace(sessionKey[0]) == "" {
+		return fmt.Errorf("confirming Codex interrupt: native session identity is unavailable")
+	}
+	return waitForCodexInterruptBoundary(ctx, codexHome, since, timeout, sessionKey[0])
 }
 
-func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since time.Time, timeout time.Duration) error {
+func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since time.Time, timeout time.Duration, sessionKey ...string) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		transcriptPath, modTime, err := latestCodexTranscriptPath(codexHome)
+		transcriptPath, modTime, err := latestCodexTranscriptPath(codexHome, sessionKey...)
 		if err == nil && !modTime.Before(since) {
 			tail, err := readFileTail(transcriptPath, codexInterruptBoundaryTailBytes)
-			if err == nil && codexTranscriptTailContainsTurnAborted(tail) {
+			if err == nil && codexTranscriptTailContainsTurnAborted(tail, since) {
 				return nil
 			}
 		}
@@ -4658,7 +4663,7 @@ func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since 
 	return ErrIdleTimeout
 }
 
-func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
+func latestCodexTranscriptPath(codexHome string, sessionKey ...string) (string, time.Time, error) {
 	root := filepath.Join(codexHome, "sessions")
 	var latestPath string
 	var latestMod time.Time
@@ -4667,6 +4672,9 @@ func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
 			return nil
 		}
 		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return nil
+		}
+		if len(sessionKey) > 0 && !strings.HasSuffix(d.Name(), "-"+sessionKey[0]+".jsonl") {
 			return nil
 		}
 		info, err := d.Info()
@@ -4717,7 +4725,7 @@ func readFileTail(path string, maxBytes int64) (_ string, err error) {
 	return string(buf), nil
 }
 
-func codexTranscriptTailContainsTurnAborted(tail string) bool {
+func codexTranscriptTailContainsTurnAborted(tail string, since ...time.Time) bool {
 	lines := strings.Split(strings.TrimSpace(tail), "\n")
 	seen := 0
 	for i := len(lines) - 1; i >= 0 && seen < codexInterruptBoundaryRecentLines; i-- {
@@ -4726,6 +4734,25 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 			continue
 		}
 		seen++
+		var entry struct {
+			Timestamp time.Time `json:"timestamp"`
+			Type      string    `json:"type"`
+			Payload   struct {
+				Type string `json:"type"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if len(since) > 0 && (entry.Timestamp.IsZero() || entry.Timestamp.Before(since[0])) {
+			continue
+		}
+		if entry.Type == "event_msg" && entry.Payload.Type == "turn_aborted" {
+			return true
+		}
+		if entry.Type == "event_msg" && entry.Payload.Type == "task_started" {
+			return false
+		}
 		if !strings.Contains(line, "<turn_aborted>") {
 			continue
 		}

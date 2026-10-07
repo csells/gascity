@@ -194,9 +194,9 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm
 // a provider-native interrupt boundary before the next turn is injected.
-func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
+func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration, sessionKey ...string) error {
 	if wp, ok := p.route(name).(runtime.InterruptBoundaryWaitProvider); ok {
-		return wp.WaitForInterruptBoundary(ctx, name, since, timeout)
+		return wp.WaitForInterruptBoundary(ctx, name, since, timeout, sessionKey...)
 	}
 	return runtime.ErrInteractionUnsupported
 }

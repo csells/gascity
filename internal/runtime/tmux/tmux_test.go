@@ -2255,21 +2255,31 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	}
 }
 
-func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
-	fe := &fakeExecutor{}
-	tm := NewTmuxWithConfig(DefaultConfig())
-	tm.exec = fe
-
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
-	if err != nil {
-		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+// Multiline input must reach the provider as one paste, even below the
+// command-size threshold; literal keystrokes can lose preceding lines.
+func TestSendKeysLiteralWithRetryUsesPasteBuffer(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"large", strings.Repeat("x", maxSendKeysLiteralLen+1)},
+		{"multiline", "begin\ncontext\nend"},
+		{"carriage-return", "begin\rend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			tm := NewTmuxWithConfig(DefaultConfig())
+			tm.exec = fe
+			if err := tm.sendKeysLiteralWithRetry("%1", tc.text, time.Second); err != nil {
+				t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+			}
+			if len(fe.calls) != 2 {
+				t.Fatalf("tmux calls = %v, want load-buffer then bracketed paste", fe.calls)
+			}
+			assertTmuxCommand(t, fe.calls[0], "load-buffer")
+			assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+			if !strings.Contains(strings.Join(fe.calls[1], "\x00"), "\x00-p\x00") {
+				t.Fatalf("paste-buffer call = %v, want bracketed paste", fe.calls[1])
+			}
+		})
 	}
-
-	if len(fe.calls) != 2 {
-		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
-	}
-	assertTmuxCommand(t, fe.calls[0], "load-buffer")
-	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
 }
 
 func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
@@ -3003,6 +3013,40 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 }
 
 func TestCodexTranscriptTailContainsTurnAborted(t *testing.T) {
+	t.Run("stale native abort cannot satisfy a new stop", func(t *testing.T) {
+		if codexTranscriptTailContainsTurnAborted(`{"timestamp":"2026-10-07T12:15:24.009Z","type":"event_msg","payload":{"type":"turn_aborted"}}`, time.Date(2026, 10, 7, 12, 16, 0, 0, time.UTC)) {
+			t.Fatal("accepted stale abort")
+		}
+	})
+	t.Run("other sessions cannot supply acknowledgement", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, "sessions")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		own := filepath.Join(dir, "rollout-own.jsonl")
+		other := filepath.Join(dir, "rollout-other.jsonl")
+		if err := os.WriteFile(own, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(time.Minute)
+		if err := os.Chtimes(other, future, future); err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := latestCodexTranscriptPath(home, "own")
+		if err != nil || got != own {
+			t.Fatalf("path=%q error=%v", got, err)
+		}
+		if _, _, err := latestCodexTranscriptPath(home, "missing"); !os.IsNotExist(err) {
+			t.Fatalf("missing identity borrowed another transcript: %v", err)
+		}
+	})
+	if !codexTranscriptTailContainsTurnAborted(`{"timestamp":"2026-10-07T12:15:24.009Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"test-turn"}}`) {
+		t.Fatal("native turn_aborted event was not recognized")
+	}
 	tail := strings.Join([]string{
 		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}`,
 		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}`,
@@ -3040,7 +3084,7 @@ func TestWaitForCodexInterruptBoundary(t *testing.T) {
 			return
 		}
 		defer f.Close()
-		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
+		_, _ = fmt.Fprintf(f, `{"timestamp":%q,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"test-turn"}}`+"\n", time.Now().UTC().Format(time.RFC3339Nano))
 	}()
 
 	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {

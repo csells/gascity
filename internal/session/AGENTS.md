@@ -66,3 +66,30 @@ evidence from tests, source, an issue, or a commit.
   Propagate that stale verdict to the provider-aware caller and clean up using
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
+
+## Message delivery
+
+Interpret runtime delivery outcomes in the shared session layer. Proven delivery
+without an observed busy transition is successful delivery with a diagnostic, not
+permission to resend or evidence of turn completion. Keep uncertain delivery as
+an error so API and CLI callers cannot disagree or duplicate input.
+
+## Transcript attribution
+
+Preserve the provider session key through fallback discovery. For providers with
+strict keyed lookup, an absent new transcript is pending history, not permission
+to read an older conversation in the same directory.
+
+## Runtime loss
+
+A lost process is not an explicit conversation reset. Preserve committed manual
+conversation identity during advisory healing; use the session-owned policy so
+pool recycling and failed-create recovery remain distinct. Apply the same manual
+conversation policy during wake-failure and churn accounting; retaining context
+must not disable retry counters or quarantine.
+
+The API marks manual conversations with `session_origin=manual`; do not assume
+all retained conversations carry the legacy `manual_session=true` flag. Reapers
+must honor the started-manual conversation policy as well as legacy exemptions.
+
+Codex interrupt confirmation passes the stored native session key across the runtime boundary. A shared native home does not identify a conversation; never select another session's newest transcript to acknowledge a stop.

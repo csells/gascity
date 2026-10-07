@@ -1087,3 +1087,87 @@ func TestParseApprovalPrompt_WrappedQuestionStopsAtTheMenu(t *testing.T) {
 		t.Errorf("Question = %q, want only the question rows", a.Question)
 	}
 }
+
+func TestParseApprovalPrompt_CodexCommand(t *testing.T) {
+	pane := `Previous conversation
+  Would you like to run the following command?
+
+  Environment: local
+  Reason: Allow the disposable artifact?
+
+  $ python3 -c "write_artifact()"
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with ` + "`python3`" + ` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+`
+	a := parseApprovalPrompt(pane)
+	if a == nil {
+		t.Fatal("real Codex approval not recognized")
+	}
+	if a.ToolName != "exec_command" || a.Description != "Allow the disposable artifact?" || a.Command != `python3 -c "write_artifact()"` {
+		t.Fatalf("wrong prompt details: %#v", a)
+	}
+	for action, want := range map[string]string{"approve": "y", "deny": "Escape", "approve_always": "p"} {
+		got, err := approvalOptionKey(a, action)
+		if err != nil || got != want {
+			t.Errorf("%s: %q, %v; want %q", action, got, err, want)
+		}
+	}
+	for name, invalid := range map[string]string{"history": pane + "› Ask Codex to do anything", "missing footer": strings.ReplaceAll(pane, "Press enter to confirm or esc to cancel", ""), "no cursor": strings.ReplaceAll(pane, "› 1.", "  1.")} {
+		if parseApprovalPrompt(invalid) != nil {
+			t.Errorf("accepted non-live %s dialog", name)
+		}
+	}
+	changed := parseApprovalPrompt(strings.ReplaceAll(pane, "write_artifact()", "different_artifact()"))
+	if changed == nil || approvalHash(changed) == approvalHash(a) {
+		t.Fatal("different command must have different request identity")
+	}
+}
+
+const liveCodexApprovalCapture = "\n  These are discovery-time hints, not execution gates — the vendor loads every\n  skill from the sink directory regardless of what this appendix lists.\n\n\n• Ready\n\n  13:10\n\n\n› This is a disposable permission test. Use your shell tool to run exactly:\n  python3 -c \"from pathlib import Path; Path('/home/tester/staging/\n  qualification/qualification-codex-e2ce9b52/\n  approve.txt').write_text('QUALIFICATION_approve')\" . Use exec_command with\n  sandbox_permissions=require_escalated and justification=Allow this disposable\n  approval test to write its own artifact? The configured read-only sandbox\n  needs user approval for this write. If denied, do not retry, use another\n  tool, or work around denial. Report the result briefly.\n\n\n• I’ll run the exact command with the requested approval prompt.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n◦ Working (5s • esc to interrupt)\n\n\n› Ask Codex to do anything\n\n  GPT-6-Luna medium · ~/projects/city · Say Ready a…  ⚠ 2 warnings · f2 to view\n\n  │ approve.txt').write_text('QUALIFICATION_approve')\"\n\n\n  Would you like to run the following command?\n\n  Environment: local\n\n  Reason: Allow this disposable approval test to write its own artifact? The\n  configured read-only sandbox needs user approval for this write.\n\n  $ python3 -c \"from pathlib import Path;\n  Path('/home/tester/staging/qualification/qualification-codex-e2ce9b52/approv\n  e.txt').write_text('QUALIFICATION_approve')\"\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `python3 -c \"from\n     pathlib import Path; Path('/home/tester/staging/qualification/\n     qualification-codex-e2ce9b52/\n     approve.txt').write_text('QUALIFICATION_approve')\"` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+
+func TestCodexApprovalRespondAndDeliveryGuard(t *testing.T) {
+	for _, action := range []string{"approve", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			fe := &fakeExecutor{outs: []string{liveCodexApprovalCapture, "0", "", "› Ask Codex to do anything"}}
+			tm := &Tmux{exec: fe}
+			if err := tm.Respond("own-session", runtime.InteractionResponse{Action: action}); err != nil {
+				t.Fatal(err)
+			}
+			sends := 0
+			for _, call := range fe.calls {
+				if sendsKeys(call) {
+					sends++
+					want := "y"
+					if action == "deny" {
+						want = "Escape"
+						for _, arg := range call {
+							if arg == "-l" {
+								t.Fatal("Escape must be a key, not literal text")
+							}
+						}
+					}
+					if call[len(call)-1] != want {
+						t.Fatalf("wrong answer: %q", call)
+					}
+				}
+			}
+			if sends != 1 {
+				t.Fatalf("sent %d answers, want exactly one", sends)
+			}
+		})
+	}
+	fe := &fakeExecutor{out: liveCodexApprovalCapture}
+	tm := &Tmux{exec: fe}
+	if err := tm.checkNoApprovalPrompt("own-session"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("must guard prompt delivery: %v", err)
+	}
+	for _, call := range fe.calls {
+		if sendsKeys(call) {
+			t.Fatalf("sent into permission dialog: %q", call)
+		}
+	}
+}

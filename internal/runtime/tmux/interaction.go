@@ -92,6 +92,7 @@ var approvalDialogTools = map[string]string{
 
 // parsedApproval holds the parsed approval prompt from a tmux pane capture.
 type parsedApproval struct {
+	Provider string
 	ToolName string
 	Input    string
 	Question string
@@ -116,6 +117,9 @@ type approvalOption struct {
 // "Esc to cancel" footer): a menu that has scrolled above the composer is
 // history, and conversational text is not a prompt.
 func parseApprovalPrompt(paneText string) *parsedApproval {
+	if approval := parseCodexCommandApproval(paneText); approval != nil {
+		return approval
+	}
 	lines := strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")
 
 	end := len(lines)
@@ -151,6 +155,72 @@ func parseApprovalPrompt(paneText string) *parsedApproval {
 	approval := &parsedApproval{Question: questionText, Options: options}
 	describeApprovalTool(approval, lines[:question])
 	return approval
+}
+
+// parseCodexCommandApproval recognizes the command approval rendered by Codex
+// 0.156. Require its live footer, command, environment, question and selected
+// numbered menu. A copy above a composer is history and must not block input.
+// Command retains display wrapping; it is presentation, never executable input.
+func parseCodexCommandApproval(paneText string) *parsedApproval {
+	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(paneText, "\r", "")), "\n")
+	if len(lines) < 2 || strings.TrimSpace(lines[len(lines)-1]) != "Press enter to confirm or esc to cancel" {
+		return nil
+	}
+	lines = lines[:len(lines)-1]
+	question := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "Would you like to run the following command?" {
+			question = i
+			break
+		}
+	}
+	if question < 0 {
+		return nil
+	}
+	menu := -1
+	for i := question + 1; i < len(lines); i++ {
+		if approvalOptionRe.MatchString(strings.TrimSpace(lines[i])) {
+			menu = i
+			break
+		}
+	}
+	if menu < 0 {
+		return nil
+	}
+	options, ok := parseApprovalMenu(lines[menu:])
+	if !ok {
+		return nil
+	}
+	var reason, command []string
+	environment := false
+	section := ""
+	for _, line := range lines[question+1 : menu] {
+		text := strings.TrimSpace(line)
+		switch {
+		case text == "":
+			section = ""
+		case strings.HasPrefix(text, "Environment: "):
+			environment = true
+		case strings.HasPrefix(text, "Reason: "):
+			section = "reason"
+			reason = append(reason, strings.TrimPrefix(text, "Reason: "))
+		case strings.HasPrefix(text, "$ "):
+			section = "command"
+			command = append(command, strings.TrimPrefix(text, "$ "))
+		case section == "reason":
+			reason = append(reason, text)
+		case section == "command":
+			command = append(command, text)
+		default:
+			return nil
+		}
+	}
+	if !environment || len(command) == 0 {
+		return nil
+	}
+	cmd := strings.Join(command, "\n")
+	description := strings.Join(reason, " ")
+	return &parsedApproval{Provider: "codex", ToolName: "exec_command", Question: strings.TrimSpace(lines[question]), Options: options, Command: cmd, Description: description, Input: truncateApprovalInput(cmd + "\n" + description)}
 }
 
 // approvalQuestionMaxRows bounds how many pane rows one question may span.
@@ -464,7 +534,9 @@ func approvalOptionKey(approval *parsedApproval, action string) (string, error) 
 	var match func(label string) bool
 	switch action {
 	case "approve":
-		match = func(label string) bool { return label == "yes" }
+		match = func(label string) bool {
+			return label == "yes" || (approval.Provider == "codex" && label == "yes, proceed (y)")
+		}
 	case "approve_always":
 		match = func(label string) bool {
 			return strings.HasPrefix(label, "yes, and don't ask again") ||
@@ -500,6 +572,16 @@ func approvalOptionKey(approval *parsedApproval, action string) (string, error) 
 	if found[0].Number < 1 || found[0].Number > 9 {
 		return "", fmt.Errorf("%w: option %d for action %q cannot be selected with one key (menu: %s)",
 			runtime.ErrInteractionActionUnavailable, found[0].Number, action, strings.Join(labels, " | "))
+	}
+	if approval.Provider == "codex" {
+		switch action {
+		case "approve":
+			return "y", nil
+		case "deny":
+			return "Escape", nil
+		case "approve_always":
+			return "p", nil
+		}
 	}
 	return strconv.Itoa(found[0].Number), nil
 }
@@ -736,7 +818,12 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	t.cancelCopyModeIfParked(name)
 
 	// Send the keystroke once.
-	if _, err := t.run("send-keys", "-t", paneTarget(name), "-l", key); err != nil {
+	args := []string{"send-keys", "-t", paneTarget(name)}
+	if key != "Escape" {
+		args = append(args, "-l")
+	}
+	args = append(args, key)
+	if _, err := t.run(args...); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
 		}
