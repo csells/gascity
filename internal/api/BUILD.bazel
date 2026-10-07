@@ -1,3 +1,4 @@
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
@@ -17,6 +18,7 @@ go_library(
         "convoy_event_stream.go",
         "convoy_sql.go",
         "cursor_token.go",
+        "dashport_support.go",
         "decode_beads.go",
         "decode_convoys.go",
         "decode_mail.go",
@@ -175,6 +177,7 @@ go_library(
         "//internal/agentutil",
         "//internal/api/apierr",
         "//internal/api/dashboardbff",
+        "//internal/api/dashboardspa",
         "//internal/api/genclient",
         "//internal/beadmeta",
         "//internal/beads",
@@ -325,6 +328,7 @@ go_test(
         "handler_lists_keyset_test.go",
         "handler_mail_test.go",
         "handler_maintenance_test.go",
+        "handler_order_check_cache_test.go",
         "handler_orders_test.go",
         "handler_packs_write_test.go",
         "handler_patches_test.go",
@@ -461,8 +465,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
-        "//docs:all_files",
+        "//docs:reference_schema",
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
@@ -539,7 +542,20 @@ go_test(
     ],
 )
 
-exports_files(["handler_sessions.go"])
+exports_files([
+    "handler_sessions.go",
+    # Committed spec, compared against cmd/genspec output by
+    # //cmd/genspec:genspec_in_sync_test.
+    "openapi.json",
+])
+
+# The spec where the dashboard's openapi-ts config reads it (../../openapi.json
+# from dashboardspa/web) inside the output tree rules_js runs tools in.
+copy_to_bin(
+    name = "openapi_json_bin",
+    srcs = ["openapi.json"],
+    visibility = ["//internal/api/dashboardspa/web:__pkg__"],
+)
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
@@ -549,6 +565,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

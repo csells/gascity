@@ -3473,10 +3473,12 @@ func reapRuntimesBoundToClosedBeads(
 		seen[name] = true
 		if inv != nil {
 			inv.closedBound.candidates++
-			// The lane read GC_SESSION_ID once per incarnation. This filter
-			// rests on GC_SESSION_ID never changing within an incarnation:
-			// a runtime rebound to another bead is a new incarnation, which
-			// carries no owner until the lane enriches it.
+			// The lane reads GC_SESSION_ID for each incarnation and refreshes
+			// it, least recently read first; a failed refresh clears the
+			// owner until a later read. This filter rests on GC_SESSION_ID
+			// never changing within an incarnation: a runtime rebound to
+			// another bead is a new incarnation, which carries no owner
+			// until the lane reads it.
 			if owner, ok := inv.owner(name); ok {
 				if _, open := sessionBeads.FindInfoByID(owner); open {
 					inv.closedBound.filtered++
@@ -3545,8 +3547,11 @@ func reapRuntimesBoundToClosedBeads(
 // gone by now, and providers whose GetMeta reads sidecar files (acp,
 // subprocess) answer for a gone name, so it then stops only a name a fresh
 // exact-name listing still shows, as a live listing would have. stopped
-// reports whether Stop ran, and err is its error. The unlock is deferred, so a
-// provider panic cannot leave the name locked.
+// reports whether Stop ran, and err is its raw error: the caller reports a reap
+// only when this Stop removed the runtime, so it classifies a gone answer — a
+// missing tmux server included — with runtime.IsSessionGone itself instead of
+// having runtime.StopForCleanup turn it into success. The unlock is deferred,
+// so a provider panic cannot leave the name locked.
 func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provider, listed bool) (bool, error) {
 	unlock := runtimeNames.tryLock(cityPath, name)
 	if unlock == nil {
@@ -3624,7 +3629,7 @@ func sweepProcessTableOrphans(
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
 	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", proctable.SummarizeScanError(err)) //nolint:errcheck
 	}
 
 	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))

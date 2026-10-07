@@ -378,7 +378,7 @@ func (c *CachingStore) Reopen(id string) error {
 	if !refreshed {
 		// The backing's reopen dropped metadata.close_reason; the patch
 		// mirrors it.
-		reopened, found = c.patchedCachedRowLocked(id, dropCloseReasonMetadata)
+		reopened, found = c.patchedCachedRowLocked(id, forgetCloseReason)
 	}
 	setBeadStatus(&reopened, "open")
 	if !raced {

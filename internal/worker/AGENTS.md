@@ -35,3 +35,23 @@ direct `session.Manager.CreateSession` call sites outside the worker boundary.
 resume-key discovery/persistence must not replace it or the caller's logical
 conversation ID. Provider identity stays in `ProviderSessionID`; a late hook
 must not make an unchanged transcript appear to be a different stream.
+## Bounded observation
+
+`worker.ObserveBounded` is how a caller waits on an observation (a handle read,
+a runtime probe, a metadata read) without waiting forever. The call under the
+wait can hang on a wedged tmux subprocess or a stalled store, and nothing
+cancels it, so the wait is raced against the caller's context and abandoned
+when the context ends. Take the bound from the caller's own context.
+
+- An abandoned wait is an error wrapping both `runtime.ErrRuntimeUnavailable`
+  and the context error. It is never a confirmed absence: callers must treat it
+  as "do not know" (`SESSION-RUNTIME-009`), not as `ErrSessionNotFound`.
+- An answer that lands as the context ends is used, not dropped.
+- At most one observation per key is in flight. While an earlier one has not
+  returned, a new call gets `ErrObservationOutstanding` (also
+  `runtime.ErrRuntimeUnavailable`) and starts nothing, so a wedged session
+  costs one goroutine, not one per call.
+- The key names what is observed: one session in one city. Every caller that
+  observes the same session must derive the key the same way, or the
+  one-in-flight limit no longer holds. `cmd/gc` derives it in
+  `postStartObservationKey`.

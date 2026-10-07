@@ -27,16 +27,38 @@ func (m reconcilerMode) String() string {
 	return config.SessionReconcilerLegacy
 }
 
-// v2ControllersInBuild reports whether this build carries the v2 allocator
-// (P3) and the first session controller group (P4.1). Until both land, v2
-// would start, restart and scale nothing, so selecting it is refused.
-const v2ControllersInBuild = v2SessionControllerReal && v2AllocatorControllerReal
+// v2EffectsReal reports whether the planner submits what admission lets
+// through. Until C9 it is false: the planner runs trace-only.
+const v2EffectsReal = false
+
+// v2ControllersInBuild reports whether v2 would act. While the planner is
+// trace-only it would start, restart and scale nothing, so selecting it is
+// refused.
+const v2ControllersInBuild = v2EffectsReal
 
 // v2SkeletonEnv is the developer-only override that admits v2 before its
 // controllers are in the build, for smoke runs of the skeleton on a throwaway
 // city. Only the exact value "1" counts. Deleted in P4.1, when v2 becomes
 // admissible on its own (OQ-1).
 const v2SkeletonEnv = "GC_RECONCILER_V2_SKELETON"
+
+// v2EffectsEnv is the staging-only knob (D-14) that runs the planner's
+// effects before C9, under the skeleton override only. Only the exact value
+// "1" counts. C9 deletes it with the override.
+const v2EffectsEnv = "GC_RECONCILER_V2_EFFECTS"
+
+// v2EffectsEnabled reports whether the planner submits the effects it
+// admits; otherwise its passes are trace-only.
+func v2EffectsEnabled(lookupEnv func(string) (string, bool)) bool {
+	if v2EffectsReal {
+		return true
+	}
+	if !v2SkeletonOverride(lookupEnv) {
+		return false
+	}
+	v, ok := lookupEnv(v2EffectsEnv)
+	return ok && v == "1"
+}
 
 // reconcilerModeLookupEnv is the environment the composition edges (gc start,
 // the supervisor, doctor) latch with. Tests replace it instead of setting the

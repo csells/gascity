@@ -805,7 +805,7 @@ func setBeadStatus(b *Bead, status string) {
 	}
 }
 
-// dropCloseReasonMetadata removes metadata.close_reason from a bead a
+// forgetCloseReason removes metadata.close_reason from a bead a
 // whole-row store is reopening, or that an update moves from closed to not
 // closed (a reason the same update sets is merged after this, so it survives).
 // That key is the input to the bead's next close
@@ -813,7 +813,7 @@ func setBeadStatus(b *Bead, status string) {
 // reopened bead that kept it handed the old reason to a later close made
 // without one. The metadata map is replaced, never mutated in place, since
 // callers may share it.
-func dropCloseReasonMetadata(b *Bead) {
+func forgetCloseReason(b *Bead) {
 	if _, ok := b.Metadata[closeReasonMetadataKey]; !ok {
 		return
 	}

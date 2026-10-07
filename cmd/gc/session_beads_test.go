@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -8503,6 +8504,48 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	for _, want := range []string{"partial scan failed", "gm-reaped", "gm-term-fails", "terminate failed"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// A scan that cannot read dozens of same-uid /proc entries used to log one
+// line per entry on every patrol. The sweep now logs one bounded summary line
+// per tick, keeping a failure of the scan as a whole verbatim.
+func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
+	var entries error
+	for pid := 1000; pid < 1070; pid++ {
+		entries = errors.Join(entries, &proctable.EntryError{PID: pid, Err: fmt.Errorf("reading environ for pid %d: permission denied", pid)})
+	}
+	listErr := errors.New("tmux list running: no tmux server running")
+	store := beads.NewMemStore()
+	sp := newProcessTableSweepProvider()
+	const scanLine = "scanning process table for orphaned runtimes"
+
+	for _, tick := range []struct {
+		name    string
+		findErr error
+		want    string
+	}{
+		{name: "entry failures", findErr: entries, want: `70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)`},
+		{name: "same entry failures next tick", findErr: entries, want: "70 unreadable process entries"},
+		{name: "whole-scan failure", findErr: errors.Join(entries, listErr), want: listErr.Error()},
+		{name: "clean scan", findErr: nil},
+	} {
+		sp.findErr = tick.findErr
+		var stderr bytes.Buffer
+		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, t.TempDir(), &stderr)
+		got := stderr.String()
+		if tick.want == "" {
+			if strings.Contains(got, scanLine) {
+				t.Errorf("%s: stderr = %q, want no scan error line", tick.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, scanLine) || !strings.Contains(got, tick.want) {
+			t.Errorf("%s: stderr = %q, want a scan error line naming %q", tick.name, got, tick.want)
+		}
+		if lines := strings.Count(got, "\n"); lines != 1 || len(got) > 400 {
+			t.Errorf("%s: stderr is %d lines, %d bytes; want one bounded line: %q", tick.name, lines, len(got), got)
 		}
 	}
 }

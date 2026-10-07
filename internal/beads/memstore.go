@@ -236,7 +236,7 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 		setBeadStatus(&m.beads[i], *opts.Status)
 	}
 	if oldStatus == "closed" && m.beads[i].Status != "closed" {
-		dropCloseReasonMetadata(&m.beads[i])
+		forgetCloseReason(&m.beads[i])
 	}
 	if opts.Description != nil {
 		m.beads[i].Description = *opts.Description
@@ -354,10 +354,11 @@ func (m *MemStore) Reopen(id string) error {
 			}
 			wasClosed := m.beads[i].Status == "closed"
 			setBeadStatus(&m.beads[i], "open")
-			dropCloseReasonMetadata(&m.beads[i])
+			forgetCloseReason(&m.beads[i])
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {
+				forgetCloseReason(&m.beads[i])
 				// closed→open starts a new ownership generation; an
 				// in_progress→open reopen keeps the same owner and is not a
 				// transition.
