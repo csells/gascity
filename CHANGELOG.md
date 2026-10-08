@@ -175,6 +175,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- API-created agent sessions now persist the resolved template command as their
+  startup baseline, preventing provider defaults from being mistaken for command
+  drift while a deferred session is starting. Explicit session overrides remain
+  separate and genuine command changes still invalidate an in-flight start.
+- Session and agent detail reads batch live active-work lookups by store, avoiding
+  repeated database subprocesses for each session identity while preserving fresh
+  assignment data and concrete-session priority over aliases.
+
 - **Text sent to a Claude session no longer answers its permission prompt,
   and approvals are detected and answered on current Claude Code.** On
   Claude Code 2.1.28x the tmux pane scraper missed the permission dialog

@@ -77,7 +77,7 @@ type contractHarness struct {
 	mailbox string
 }
 
-func newContractHarness(t *testing.T) *contractHarness {
+func newContractHarness(t *testing.T, configure ...func(string)) *contractHarness {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -106,6 +106,10 @@ func newContractHarness(t *testing.T) *contractHarness {
 	// A rig-scoped template expands to <rig>/<name> and backs the qualified
 	// agent routes.
 	writeContractFile(t, filepath.Join(cityPath, "agents", contractRigAgent, "agent.toml"), "scope = \"rig\"\nstart_command = \"true\"\n")
+
+	for _, configureCity := range configure {
+		configureCity(cityPath)
+	}
 
 	cfg, prov, err := loadCityConfigWithBuiltinPacks(cityPath)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -263,4 +264,30 @@ func derefSlice[T any](p *[]T) []T {
 		return nil
 	}
 	return *p
+}
+
+// API-created rows must carry the same default command baseline the controller
+// compares at async-start commit. Session overrides remain separate from it.
+func TestAPIContractSessionCreateProviderDefaults(t *testing.T) {
+	h := newContractHarness(t, func(cityPath string) {
+		writeContractFile(t, filepath.Join(cityPath, "city.toml"), contractCityToml()+`
+[providers.codex]
+base = "builtin:codex"
+[providers.codex.option_defaults]
+model = "gpt-6-luna"
+effort = "medium"
+`)
+		writeContractFile(t, filepath.Join(cityPath, "agents", contractAgent, "agent.toml"), `scope = "city"
+provider = "codex"
+`)
+	})
+	sess := h.createAgentSession(t, "provider default command")
+	b, err := h.cs.SessionsBeadStore().Get(sess.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := b.Metadata["command"]
+	if !strings.Contains(command, "--model gpt-6-luna") || !strings.Contains(command, "model_reasoning_effort=medium") {
+		t.Fatalf("created session command %q is not the provider-default baseline", command)
+	}
 }
