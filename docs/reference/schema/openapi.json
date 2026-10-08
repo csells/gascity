@@ -525,14 +525,11 @@
           "TmuxAlias",
           "Scope",
           "Suspended",
-          "Pool",
-          "Env",
           "EnvRemove",
           "PreStart",
           "PromptTemplate",
           "Session",
           "Provider",
-          "ContextAdvisory",
           "Upstream",
           "Args",
           "StartCommand",
@@ -570,8 +567,7 @@
           "InjectFragmentsAppend",
           "MaxActiveSessions",
           "MinActiveSessions",
-          "ScaleCheck",
-          "OptionDefaults"
+          "ScaleCheck"
         ],
         "type": "object"
       },
@@ -2208,8 +2204,7 @@
           "ReplyToMessageID",
           "Attachments",
           "SourceSessionID",
-          "CreatedAt",
-          "Metadata"
+          "CreatedAt"
         ],
         "type": "object"
       },
@@ -2410,8 +2405,7 @@
           "BindingGeneration",
           "LastPublishedAt",
           "LastMessageID",
-          "SourceSessionID",
-          "Metadata"
+          "SourceSessionID"
         ],
         "type": "object"
       },
@@ -4087,9 +4081,6 @@
         },
         "required": [
           "Message",
-          "Binding",
-          "GroupRoute",
-          "TranscriptEntry",
           "TargetSessionID",
           "TargetAgentName"
         ],
@@ -5666,9 +5657,7 @@
           }
         },
         "required": [
-          "Receipt",
-          "DeliveryContext",
-          "TranscriptEntry"
+          "Receipt"
         ],
         "type": "object"
       },
@@ -6278,7 +6267,6 @@
           "PromptFlag",
           "ReadyDelayMs",
           "AcceptStartupDialogs",
-          "Env",
           "EnvRemove",
           "Replace"
         ],
@@ -6715,8 +6703,7 @@
           "Conversation",
           "Delivered",
           "FailureKind",
-          "RetryAfter",
-          "Metadata"
+          "RetryAfter"
         ],
         "type": "object"
       },
@@ -7055,7 +7042,6 @@
           "DefaultMergeStrategy",
           "Suspended",
           "SuspendedOnStart",
-          "FormulaVars",
           "BeadsProxiedIdleTimeout"
         ],
         "type": "object"
