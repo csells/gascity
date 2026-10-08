@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -237,4 +238,28 @@ func assertCompatDemandOnlyCode(t *testing.T, detail string) {
 	if want := apierr.DemandOnlySingleton.Code + ": "; !strings.HasPrefix(detail, want) {
 		t.Fatalf("compat refusal detail = %q, want prefix %q (the Huma routes' code)", detail, want)
 	}
+}
+
+// The bead a pre-#6858 API create left behind sits start-pending: no provider
+// start is in flight, so only pool demand can start it and the wake is still
+// refused. Only a session already creating is spared the refusal.
+func TestHumaHandleSessionWakeRefusesStartPendingDemandOnlySingletonSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	id := createDemandOnlyPoolSession(t, fs)
+	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
+		"state":                     string(session.StateStartPending),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(%s): %v", id, err)
+	}
+	srv := New(fs)
+
+	_, err := srv.humaHandleSessionWake(context.Background(), &SessionIDInput{ID: id})
+	var problem *apierr.ErrorModel
+	if !errors.As(err, &problem) || problem.Code != apierr.DemandOnlySingleton.Code {
+		t.Fatalf("humaHandleSessionWake() error = %v, want code %q", err, apierr.DemandOnlySingleton.Code)
+	}
+	assertWakeRecorded(t, fs, id)
+	assertSessionEnqueued(t, fs, id)
 }

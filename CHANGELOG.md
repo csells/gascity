@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- Editing a rig-qualified agent backed by a shared `scope = "rig"` template
+  updates that template in every rig it serves; the rig qualifier does not create
+  a per-rig configuration override (#7084, #7076).
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
@@ -174,6 +178,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response are now priority-ordered.
 
 ### Fixed
+
+- Wake requests for demand-only singleton sessions already starting are accepted
+  instead of incorrectly reporting that they cannot start. Start-pending sessions
+  still require pool demand; their wake remains refused (#7076).
 
 - Run the pre-push suite for large Go diffs and reject unreadable comparisons instead of silently skipping verification.
 

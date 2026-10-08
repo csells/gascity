@@ -867,9 +867,9 @@ func (s ChangeSource) String() string {
 	}
 }
 
-// notifyChange announces one change. Any close a read or an event patch
-// installed without announcing goes out first, so a close is never reported
-// after a later change to the same bead.
+// notifyChange drains queued close announcements before emitting this change.
+// Concurrent callers may interleave their notifications; this does not impose
+// close-before-change ordering across callers.
 func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bead) {
 	c.announceUnannouncedCloses()
 	c.emitChange(source, eventType, b)
