@@ -175,6 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep API-closed manual conversations terminal when a controller pass still holds an older desired-session plan; do not recreate their alias and runtime under a new session ID.
+
 - API-created agent sessions now persist the resolved template command as their
   startup baseline, preventing provider defaults from being mistaken for command
   drift while a deferred session is starting. Explicit session overrides remain
