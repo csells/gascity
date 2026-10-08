@@ -53,6 +53,41 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
 
+## Stopping commands owned by a turn
+
+Owned-command cancellation is an optional runtime capability. Use generated
+clients for these city-scoped session operations:
+
+- `GET /v0/city/{cityName}/session/{id}/turn-target` returns the current opaque
+  turn ID and control mode. Capture a baseline before submitting input, then
+  require a different, confirmed turn ID before stopping that submission.
+- `POST /v0/city/{cityName}/session/{id}/stop-commands` takes `turn_id`. Success
+  confirms termination of that turn's owned commands. A stale target cannot
+  stop a newer turn, and repeating a successful Stop is harmless.
+- `POST /v0/city/{cityName}/session/{id}/detach-command` takes `turn_id` and the
+  native `process_id`. It explicitly preserves that command when this turn is
+  stopped. A tool yielding a process handle does not detach it automatically.
+
+Missing ownership, unavailable native control, lost confirmation, or a native
+start whose exit cannot be confirmed returns a conflict. Do not report success
+from a turn-interrupted event, silently retry input, or substitute terminal keys
+or process-tree killing. Retain the original turn ID when recovering a lost
+Stop response. Other conversations and explicitly detached commands survive.
+
+The experimental Codex adapter is launched with `gc runtime codex --` followed
+by the selected Codex CLI arguments. Its resume command uses the same adapter
+and the original native resume key. It needs a native Codex build implementing
+`thread/backgroundTerminals/stopTurn`; stock Codex 0.156.1 does not provide that
+barrier. Keep the matching native helper beside the selected Codex binary.
+Unsupported builds fail visibly. This adapter does not retrofit an already
+running unwrapped Codex process; resumption must preserve its original key.
+Models, effort and permissions remain the caller's selected native settings.
+
+The adapter binds the main conversation from its correlated native start/resume
+reply. Temporary native conversations cannot replace it. GC persists that key
+before history lookup; missing history never permits borrowing an older manual
+conversation from the same directory.
+
 ## Request and response headers
 
 Every operation's header contract appears in the OpenAPI spec — if a

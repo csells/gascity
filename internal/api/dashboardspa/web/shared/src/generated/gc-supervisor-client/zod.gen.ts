@@ -2841,6 +2841,11 @@ export const zSessionTranscriptGetResponse = z.union([
     }).and(zSessionTranscriptStructuredResponse)
 ]);
 
+export const zSessionTurnControlInputBody = z.object({
+    process_id: z.string().optional(),
+    turn_id: z.string().min(1)
+});
+
 export const zSessionUnknownStatePayload = z.object({
     escalated: z.boolean(),
     first_seen: z.string().optional(),
@@ -3296,6 +3301,12 @@ export const zOutboundResult = z.object({
     DeliveryContext: zDeliveryContextRecord.optional(),
     Receipt: zPublishReceipt,
     TranscriptEntry: zConversationTranscriptRecord.optional()
+});
+
+export const zTurnTarget = z.object({
+    mode: z.enum(['owned_commands', 'native_interrupt']),
+    state: z.string(),
+    turn_id: z.string().optional()
 });
 
 export const zUnboundEventPayload = z.object({
@@ -9671,6 +9682,22 @@ export const zPostV0CityByCityNameSessionByIdCloseQuery = z.object({
  */
 export const zPostV0CityByCityNameSessionByIdCloseResponse = zOkResponseBody;
 
+export const zPostV0CityByCityNameSessionByIdDetachCommandBody = zSessionTurnControlInputBody;
+
+export const zPostV0CityByCityNameSessionByIdDetachCommandHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdDetachCommandPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdDetachCommandResponse = zTurnTarget;
+
 export const zPostV0CityByCityNameSessionByIdKillHeaders = z.object({
     'X-GC-Request': z.string().min(1)
 });
@@ -9788,6 +9815,22 @@ export const zPostV0CityByCityNameSessionByIdStopPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameSessionByIdStopResponse = zOkWithIdResponseBody;
+
+export const zPostV0CityByCityNameSessionByIdStopCommandsBody = zSessionTurnControlInputBody;
+
+export const zPostV0CityByCityNameSessionByIdStopCommandsHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdStopCommandsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdStopCommandsResponse = zTurnTarget;
 
 export const zStreamSessionHeaders = z.object({
     'Last-Event-ID': z.string().max(2048).optional()
@@ -9910,6 +9953,16 @@ export const zGetV0CityByCityNameSessionByIdTranscriptQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameSessionByIdTranscriptResponse = zSessionTranscriptGetResponse;
+
+export const zGetV0CityByCityNameSessionByIdTurnTargetPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameSessionByIdTurnTargetResponse = zTurnTarget;
 
 export const zPostV0CityByCityNameSessionByIdWakeHeaders = z.object({
     'X-GC-Request': z.string().min(1)

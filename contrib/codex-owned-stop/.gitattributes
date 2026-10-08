@@ -1,0 +1,3 @@
+# Unified-diff blank context lines require a literal space. Check whitespace
+# on the applied native source, not on its patch transport representation.
+codex.patch -whitespace

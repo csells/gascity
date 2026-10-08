@@ -45,6 +45,7 @@ go_library(
         "template_overrides.go",
         "transcript_lookup.go",
         "transcript_meta_page.go",
+        "turn_control.go",
         "tx.go",
         "wait_store.go",
         "waits.go",

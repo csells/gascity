@@ -3839,6 +3839,7 @@ designed to be called from within running agent sessions, not by humans.
 
 The exception is "gc runtime check", which validates a Runtime Provider
 Protocol executable — run by humans and runtime-pack CIs.
+"gc runtime codex" is an opt-in provider launcher with native command ownership.
 
 ```
 gc runtime
@@ -3847,6 +3848,7 @@ gc runtime
 | Subcommand | Description |
 |------------|-------------|
 | [gc runtime check](#gc-runtime-check) | Validate a runtime executable against the Runtime Provider Protocol |
+| [gc runtime codex](#gc-runtime-codex) | Run Codex with GC-owned command cancellation |
 | [gc runtime conformance](#gc-runtime-conformance) | Run the golden RPP conformance suite against a runtime executable |
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
@@ -3887,6 +3889,14 @@ gc runtime check <name|executable> [flags]
 |------|------|---------|-------------|
 | `--command` | string |  | session command sent in the start config (default "sleep 300") |
 | `--session-name` | string |  | session name for the conformance round-trip (default: generated unique name) |
+
+## gc runtime codex
+
+Run Codex with GC-owned command cancellation
+
+```
+gc runtime codex -- [codex arguments]
+```
 
 ## gc runtime conformance
 

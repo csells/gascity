@@ -4910,10 +4910,10 @@ func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback
 	mgr := NewManagerWithOptions(store, sp)
 
 	workDir := t.TempDir()
-	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "claude", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
+	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "claude", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "pool"}}); err != nil {
 		t.Fatalf("Create claude: %v", err)
 	}
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "codex", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "codex", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "pool"}})
 	if err != nil {
 		t.Fatalf("Create codex: %v", err)
 	}
@@ -5983,5 +5983,39 @@ func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
 	}
 	if path != keyPath || lookup != TranscriptFound {
 		t.Fatalf("path=%q classification=%v, want exact keyed transcript", path, lookup)
+	}
+}
+
+func TestTranscriptPathManualCodexWaitsForNativeIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "codex", Command: "codex", WorkDir: workDir, Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := t.TempDir()
+	nativeID := "019d9845-abcd-7000-8000-000000000456"
+	day := filepath.Join(search, "2026", "10", "08")
+	if err := os.MkdirAll(day, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(day, "rollout-2026-10-08T12-00-00-"+nativeID+".jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"`+nativeID+`","cwd":"`+workDir+`"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := mgr.TranscriptPathClassified(info.ID, []string{search})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("new manual conversation borrowed another transcript: %s", got)
+	}
+	if err := mgr.PersistSessionKey(info.ID, nativeID); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = mgr.TranscriptPathClassified(info.ID, []string{search})
+	if err != nil || got != path {
+		t.Fatalf("authoritative identity lookup = %q, %v; want %q", got, err, path)
 	}
 }

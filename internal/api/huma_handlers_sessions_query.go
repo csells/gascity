@@ -159,13 +159,19 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	path, err := handle.TranscriptPath(ctx)
+	if errors.Is(err, worker.ErrHistoryUnavailable) {
+		// An unflushed transcript has the same empty-path response as before.
+		path = ""
+	} else if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	mgr := s.sessionManager(store.Store)
+	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

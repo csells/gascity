@@ -263,7 +263,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		// families keep the history-backed probe, whose tail read is not fenced
 		// to the adapter's search roots.
 		if strings.TrimSpace(info.SessionKey) == "" && !sessionlog.DerivesActivityFromHistory(provider) {
-			if history, histErr := h.historyWithRequest(HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
+			if history, histErr := h.historyWithRequest(ctx, HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
 				if history.TailState.Activity == TailActivityInTurn {
 					state.Phase = PhaseBusy
 				}
@@ -568,4 +568,17 @@ func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {
 	default:
 		return sessionpkg.SubmitIntentDefault
 	}
+}
+
+// ControlTurn delegates exact command ownership to the session's native owner.
+func (h *SessionHandle) ControlTurn(ctx context.Context, request runtime.TurnControlRequest) (target runtime.TurnTarget, err error) {
+	if request.Action != "target" {
+		event := h.beginOperationEvent(ctx, workerOperationControlTurn)
+		defer func() { event.finish(err) }()
+	}
+	id := h.currentSessionID()
+	if id == "" {
+		return runtime.TurnTarget{}, fmt.Errorf("%w: turn control requires an existing session", ErrOperationUnsupported)
+	}
+	return h.manager.ControlTurn(ctx, id, request)
 }

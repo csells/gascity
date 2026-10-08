@@ -179,6 +179,10 @@ type startCandidate struct {
 	// (relaunchAgentForLaunchDrift, recoverRunningPendingCreate), which
 	// never produce a startResult and so never read it.
 	configured bool
+
+	// Recovery rebuilds launch metadata for an existing runtime. Its native
+	// identity must survive even when the provider has not flushed a transcript.
+	runtimeAlreadyRunning bool
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -1152,10 +1156,12 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcript layer so each provider keeps its own resumability rules; for
 	// providers whose resume state we cannot probe on disk (codex/gemini/...)
 	// the probe reports !probeable and we leave their metadata untouched.
+	// An already-running recovery must not infer a stale identity from an absent
+	// transcript or mint a key that the existing process never received.
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
-	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
+	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" && !candidate.runtimeAlreadyRunning {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
 		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
 		if probeable {
@@ -1178,7 +1184,7 @@ func buildPreparedStartWithWorkDirResolver(
 			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(candidate.info.ID, sessFront))
 		}
 	}
-	if candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+	if !candidate.runtimeAlreadyRunning && candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
 		if err != nil {
 			return nil, candidate.info, fmt.Errorf("generating session key: %w", err)
@@ -3126,25 +3132,18 @@ func recoverRunningPendingCreate(
 	if strings.TrimSpace(info.ID) == "" || store == nil {
 		return false, nil
 	}
-	// buildPreparedStart reads template_overrides / trigger-bead env + the
-	// start-prep metadata off the candidate's typed twin, so thread the caller's
-	// coherent infoByID snapshot in. It returns the post-mutation Info even on error:
-	// any persisted start-prep mutation (a stale-resume started_config_hash clear
-	// before a session-key/instance-token mint error) is folded onto it the moment it
-	// lands, so the abort residue below matches the store.
-	prepared, partialInfo, err := buildPreparedStart(startCandidate{info: info, tp: tp}, cfg, store)
+	// Rebuild launch metadata without changing the already-running conversation.
+	// A provider can flush its transcript after pending-create recovery runs.
+	// Keep the post-preparation Info for any other persisted metadata changes.
+	prepared, partialInfo, err := buildPreparedStart(startCandidate{info: info, tp: tp, runtimeAlreadyRunning: true}, cfg, store)
 	if err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRebuildFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
 				"error": err.Error(),
 			})
 		}
-		// Fold the residue from the store-coherent post-mutation Info (not the pre-prep
-		// input): buildPreparedStart may have persisted the stale-resume started_config_hash
-		// clear before erroring, and the same-tick config-drift gate + config-drift repair
-		// read infoByID.StartedConfigHash — they must see the "" the store already holds,
-		// not the stale pre-prep hash. Pre-R4 the raw-bead mirror carried this; now the
-		// threaded partialInfo does.
+		// Fold any preparation residue from the store-coherent snapshot so the
+		// caller never restores metadata from a stale pre-preparation view.
 		return false, pendingCreateResidueFold(partialInfo)
 	}
 	coreBreakdown := ""
@@ -3205,8 +3204,8 @@ func recoverRunningPendingCreate(
 				"error": err.Error(),
 			})
 		}
-		// buildPreparedStart succeeded, so its folds (stale-resume clear + instance_token
-		// mint) are on prepared.candidate.info — fold the residue from there.
+		// Preparation succeeded; fold its metadata (including an instance-token
+		// mint when needed) from the post-preparation snapshot.
 		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
 	if !applied {

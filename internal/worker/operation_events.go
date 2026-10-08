@@ -29,6 +29,7 @@ const (
 	workerOperationRename        workerOperation = "rename"
 	workerOperationMessage       workerOperation = "message"
 	workerOperationInterrupt     workerOperation = "interrupt"
+	workerOperationControlTurn   workerOperation = "control_turn"
 	workerOperationNudge         workerOperation = "nudge"
 	workerOperationHistory       workerOperation = "history"
 )

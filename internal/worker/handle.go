@@ -55,6 +55,13 @@ type MessagingHandle interface {
 	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
 }
 
+// TurnControlHandle is an optional worker capability for exact native turn
+// targets, confirmed owned-command termination, and explicit service detachment.
+// Callers must surface unsupported control instead of using a legacy interrupt.
+type TurnControlHandle interface {
+	ControlTurn(context.Context, runtime.TurnControlRequest) (runtime.TurnTarget, error)
+}
+
 // HistoryHandle exposes normalized transcript history reads.
 type HistoryHandle interface {
 	History(context.Context, HistoryRequest) (*HistorySnapshot, error)

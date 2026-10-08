@@ -146,3 +146,11 @@ move into the ledger above only together with the tests that prove them.
 | ID | Scenario | Required behavior | Tracking |
 |---|---|---|---|
 | RUNTIME-PLAN-005 | Staging relocation | `staging.go` moves out of the contract package (or overlay staging becomes protocol data) and the import-boundary exemption is deleted. | `ga-1symz6` epic |
+
+## Native command cancellation
+
+The opt-in `gc runtime codex -- ...` adapter retains the native event connection.
+A process handle or tool yield does not declare detachment. Cancellation requires
+an exact turn identity and native process-exit confirmation; explicit detachment
+is preserved. A lost ownership stream fences subsequent submissions. Private
+control sockets are scoped to the runtime incarnation and are never a BB API.

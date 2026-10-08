@@ -1298,6 +1298,12 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
+	// Manual Codex conversations require an authoritative native identity. A
+	// first turn may not have published its SessionStart hook yet; directory
+	// recency and session order cannot attribute an older conversation to it.
+	if (provider == "codex" || wrappedProviderFamily(b, "codex")) && isManualSessionInfo(infoFromPersistedBead(b)) {
+		return "", TranscriptAbsent, nil
+	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
 	// would leave every pooled worker transcript-dark. Its mirror is keyed by

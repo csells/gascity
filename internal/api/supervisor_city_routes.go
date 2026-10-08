@@ -395,6 +395,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
+	cityGet(sm, "/session/{id}/turn-target", (*Server).humaHandleSessionTurnTarget, errorStatuses(http.StatusConflict))
+	cityPost(sm, "/session/{id}/stop-commands", (*Server).humaHandleSessionTurnStop, errorStatuses(http.StatusConflict))
+	cityPost(sm, "/session/{id}/detach-command", (*Server).humaHandleSessionTurnDetach, errorStatuses(http.StatusConflict))
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),

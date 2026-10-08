@@ -9,10 +9,13 @@ import (
 )
 
 // TranscriptPath resolves the provider-native transcript path for the worker.
-func (h *SessionHandle) TranscriptPath(_ context.Context) (string, error) {
+func (h *SessionHandle) TranscriptPath(ctx context.Context) (string, error) {
 	id := h.currentSessionID()
 	if id == "" {
 		return "", ErrHistoryUnavailable
+	}
+	if err := h.manager.RefreshNativeIdentity(ctx, id); err != nil {
+		return "", err
 	}
 	path, err := h.manager.TranscriptPath(id, h.adapter.SearchPaths)
 	if err != nil {
@@ -80,16 +83,19 @@ func (h *SessionHandle) History(ctx context.Context, req HistoryRequest) (*Histo
 	var err error
 	defer func() { event.finish(err) }()
 
-	snapshot, err := h.historyWithRequest(req)
+	snapshot, err := h.historyWithRequest(ctx, req)
 	return snapshot, err
 }
 
-func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot, error) {
+func (h *SessionHandle) historyWithRequest(ctx context.Context, req HistoryRequest) (*HistorySnapshot, error) {
 	id := h.currentSessionID()
 	if id == "" {
 		return nil, ErrHistoryUnavailable
 	}
 
+	if err := h.manager.RefreshNativeIdentity(ctx, id); err != nil {
+		return nil, err
+	}
 	info, err := h.manager.Get(id)
 	if err != nil {
 		return nil, err

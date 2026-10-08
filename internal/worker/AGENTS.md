@@ -29,12 +29,23 @@ Package-internal helpers in `internal/session/` may construct and use
 `session.Manager`; tests may construct it directly. Do not add new non-test
 direct `session.Manager.CreateSession` call sites outside the worker boundary.
 
+Owned-command target, Stop and detach calls use the optional
+`worker.TurnControlHandle` capability. A missing capability is unsupported;
+callers must not fall back to whole-session Stop or legacy interrupt. Native
+identity refresh belongs to the worker's history methods, not API handlers.
+
 ## History identity
 
 `HistorySnapshot.GCSessionID` is the durable Gas City session bead ID. Native
 resume-key discovery/persistence must not replace it or the caller's logical
 conversation ID. Provider identity stays in `ProviderSessionID`; a late hook
 must not make an unchanged transcript appear to be a different stream.
+
+Recovery of an already-running pending creation must preserve its native
+conversation key. A missing transcript can mean the provider has not flushed it
+yet; it does not authorize clearing or minting an identity for the live process.
+Fresh-launch stale-key recovery remains a separate path.
+
 ## Bounded observation
 
 `worker.ObserveBounded` is how a caller waits on an observation (a handle read,

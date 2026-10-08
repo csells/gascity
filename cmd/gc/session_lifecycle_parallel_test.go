@@ -4988,6 +4988,43 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 // post-create guard treats the healed bead as stale and the bead can be
 // closed on the next tick if the runtime briefly dies — re-opening the
 // spin loop this PR is meant to close.
+func TestRecoverRunningPendingCreatePreservesLiveConversationBeforeTranscriptFlush(t *testing.T) {
+	for _, key := range []string{"live-native-key", ""} {
+		t.Run(key, func(t *testing.T) {
+			store := beads.NewMemStore()
+			bead, err := store.Create(beads.Bead{
+				Title: "live helper", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "live-helper", "pending_create_claim": "true",
+					"state": "active", "session_origin": "manual", "session_key": key,
+					"provider": "claude", "work_dir": t.TempDir(), "instance_token": "live-incarnation",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prior := staleResumeKeyProbe
+			staleResumeKeyProbe = func(_, _, _ string) (bool, bool) { return false, true }
+			t.Cleanup(func() { staleResumeKeyProbe = prior })
+			cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+			tp := TemplateParams{SessionName: "live-helper", TemplateName: "helper", WorkDir: bead.Metadata["work_dir"], ResolvedProvider: forkClaude()}
+			if ok, _ := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, clock.Real{}, nil); !ok {
+				t.Fatal("recovery failed")
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["session_key"] != key {
+				t.Fatalf("running conversation rebound from %q to %q before transcript flush", key, got.Metadata["session_key"])
+			}
+			if got.Metadata["continuation_reset_pending"] != "" {
+				t.Fatal("recovery scheduled a fresh conversation")
+			}
+		})
+	}
+}
+
 func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

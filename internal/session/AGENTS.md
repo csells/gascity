@@ -93,3 +93,14 @@ all retained conversations carry the legacy `manual_session=true` flag. Reapers
 must honor the started-manual conversation policy as well as legacy exemptions.
 
 Codex interrupt confirmation passes the stored native session key across the runtime boundary. A shared native home does not identify a conversation; never select another session's newest transcript to acknowledge a stop.
+
+Owned-command Stop is an optional native runtime capability. Carry the persisted
+native session key and the caller's explicit turn ID to that capability. Do not
+substitute terminal interruption, session destruction, or OS process traversal
+when command ownership or termination confirmation is unavailable.
+An exact runtime incarnation can publish its native conversation key through a
+correlated native start/resume reply. The session owner persists that proof under
+its mutation lock and rejects replacement of an existing key. Subagent events,
+filesystem recency and other runtimes cannot supply this identity. Before a
+startup reply, a first-turn baseline may omit the key only when no turn started;
+Stop/detach still require a bound conversation.

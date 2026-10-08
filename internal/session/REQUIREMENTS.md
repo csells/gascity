@@ -193,6 +193,7 @@ unless the row names how they map to the canonical projection.
 | ID | Scenario | Required behavior | Evidence |
 |---|---|---|---|
 | SESSION-HISTORY-001 | A new Claude session has a known native key but its transcript has not been written | Return absent history; do not substitute an older same-workdir transcript. Once the keyed file appears, return that exact file. Preserve the key through provider-specific fallback rules. | `manager_test.go:TestTranscriptPathWaitsForKnownClaudeKey`; reproduced city BB startup baseline matched all 33 entries of a different session |
+| SESSION-HISTORY-002 | A manual Codex conversation has no native identity yet, or its keyed file is absent | Return absent history until the exact native transcript is available. Do not attribute older same-directory history by recency or session order. | `TestTranscriptPathManualCodexWaitsForNativeIdentity`; live Stop lab first-turn reproduction |
 
 ### Manual conversation runtime loss
 
@@ -213,3 +214,10 @@ unless the row names how they map to the canonical projection.
 | SESSION-FRESH-FAIL-PERMISSIONS | A failed fresh launch without a native resume key must report the original failure, never retry a stored command that discards permission overrides. | `TestStartRuntimeOnly_FailedFreshLaunchDoesNotFallBackToUnrestrictedStoredCommand` |
 | SESSION-CODEX-COMMAND-APPROVAL | Codex command approvals are exposed through pending/respond, answered once by label, and prevent prompt delivery while pending. Historical menu text is not actionable. | `TestParseApprovalPrompt_CodexCommand` |
 | SESSION-MANUAL-REAP-RESUME | Stale creating cleanup must retain a committed manual conversation being resumed; never-started and automatic worker cleanup remain unchanged. | `TestReapStaleSessionBeadsRetainsStartedManualConversation` |
+
+### Owned command cancellation
+
+| ID | Scenario | Required behavior | Evidence |
+| --- | --- | --- | --- |
+| SESSION-STOP-OWNED | A caller stops an explicitly identified native turn | Retain native thread/turn/item/process ownership; terminate owned commands through native control and confirm exit. Preserve explicit detachment and other conversations. A stale stop cannot affect a later turn. Unknown ownership, unavailable control, or lost confirmation fails visibly without a terminal-key or PID fallback. | `internal/runtime/codexcontrol/control_test.go`; `internal/api/handler_turn_control_test.go`; disposable BB qualification |
+| SESSION-NATIVE-BINDING | A retained native start/resume reply identifies the runtime conversation | Only that correlated non-ephemeral reply can supply the session key through runtime control, including before a history read. Persist it in the session owner under its mutation lock; reject any replacement of an existing key. | `TestBridgeRetainsProtocolFieldsWhileMultiplexing`; `TestOwnedTargetPersistsAuthoritativeNativeIdentity`; `TestOwnedHistoryBindsNativeIdentityBeforeTranscriptRead` |

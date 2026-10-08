@@ -11,56 +11,30 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
-// TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore pins the WI-6 R4
-// residue-coherence contract on the buildPreparedStart-ERROR abort path. When a
-// pending-create recovery rebuilds the prepared start, buildPreparedStart persists a
-// stale-resume started_config_hash clear ("") and THEN aborts (fork + wake_mode=fresh
-// fails loud, Q2). The abort residue recoverRunningPendingCreate returns must fold the
-// store-coherent cleared hash — pre-R4 the raw-bead mirror carried it; post-R4 the
-// threaded post-mutation Info carries it. If the residue instead carried the stale
-// pre-prep "deadbeef", the same-tick config-drift gate would read a non-empty hash and
-// resetConfiguredNamedSessionForConfigDrift would write it back over the store's clear
-// (#127-class drift). This FAILS against pendingCreateResidueFold(info) and PASSES
-// against pendingCreateResidueFold(partialInfo).
+// A rejected recovery preserves the running conversation and returns a
+// store-coherent residue even when its transcript has not been flushed yet.
 func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) {
-	const parentSID = "brain-xyz"
-	candidate, cfg, store := newForkSessionCandidate(t, forkClaude(), parentSID, "fresh")
-	if candidate.info.StartedConfigHash != "deadbeef" {
-		t.Fatalf("fixture started_config_hash = %q, want deadbeef (the pre-prep value)", candidate.info.StartedConfigHash)
-	}
-
-	// The session's own keyed transcript is stale (gone), so buildPreparedStart's
-	// pre-flight guard fires clearStaleResumeKeyMetadata (persisting started_config_hash="")
-	// before validateForkLaunch aborts on fork + wake_mode=fresh.
-	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
-	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
-
+	candidate, cfg, store := newForkSessionCandidate(t, forkClaude(), "brain-xyz", "fresh")
+	prior := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prior })
 	ok, residue := recoverRunningPendingCreate(candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
 	if ok {
-		t.Fatal("recoverRunningPendingCreate ok=true; want false (buildPreparedStart errors on fork + wake_mode=fresh)")
+		t.Fatal("recovery must reject fork + wake_mode=fresh")
 	}
-
-	// The store already holds the cleared hash: clearStaleResumeKeyMetadata persisted it
-	// before buildPreparedStart aborted.
 	got, err := store.Get(candidate.info.ID)
 	if err != nil {
-		t.Fatalf("store.Get: %v", err)
+		t.Fatal(err)
 	}
-	if got.Metadata["started_config_hash"] != "" {
-		t.Fatalf("store started_config_hash = %q, want cleared %q", got.Metadata["started_config_hash"], "")
+	if got.Metadata["session_key"] != candidate.info.SessionKey {
+		t.Fatalf("failed recovery rebound running conversation: %q", got.Metadata["session_key"])
 	}
-
-	// The abort residue must match the store, not the stale pre-prep hash.
-	if v, present := residue["started_config_hash"]; !present || v != "" {
-		t.Fatalf("residue started_config_hash = %q (present=%v), want %q to match the store the clear persisted", v, present, "")
+	if got.Metadata["started_config_hash"] != candidate.info.StartedConfigHash {
+		t.Fatalf("failed recovery changed running hash: %q", got.Metadata["started_config_hash"])
 	}
-
-	// The reconciler folds the residue onto its infoByID snapshot; the folded twin must
-	// carry StartedConfigHash="" so the same-tick config-drift gate skips (#127).
 	folded := candidate.info.ApplyPatch(residue)
-	if folded.StartedConfigHash != "" {
-		t.Fatalf("folded snapshot StartedConfigHash = %q, want %q (same-tick config-drift gate must skip)", folded.StartedConfigHash, "")
+	if folded.StartedConfigHash != got.Metadata["started_config_hash"] || folded.SessionKey != got.Metadata["session_key"] {
+		t.Fatal("failed recovery residue does not match the preserved store identity")
 	}
 }
 
