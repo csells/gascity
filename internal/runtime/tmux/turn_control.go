@@ -14,6 +14,9 @@ import (
 
 // ControlTurn addresses the GC-owned native adapter for this exact incarnation.
 func (p *Provider) ControlTurn(ctx context.Context, name string, req runtime.TurnControlRequest) (runtime.TurnTarget, error) {
+	if req.ProviderKind == "claude" {
+		return p.controlClaudeTurn(ctx, name, req)
+	}
 	token, err := p.GetMeta(name, "GC_INSTANCE_TOKEN")
 	if err != nil {
 		return runtime.TurnTarget{}, fmt.Errorf("reading runtime incarnation: %w", err)

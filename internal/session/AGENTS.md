@@ -98,6 +98,11 @@ Owned-command Stop is an optional native runtime capability. Carry the persisted
 native session key and the caller's explicit turn ID to that capability. Do not
 substitute terminal interruption, session destruction, or OS process traversal
 when command ownership or termination confirmation is unavailable.
+Claude's verified native task adapter uses local task controls behind this
+boundary, with exact keyed task/tool completion records as exit proof. The
+session owner alone persists explicit detachments and confirmed stopped turns;
+neither terminal interruption nor a generic rejected-tool result can persist a
+successful command Stop. Preserve that fence across supervisor restarts.
 An exact runtime incarnation can publish its native conversation key through a
 correlated native start/resume reply. The session owner persists that proof under
 its mutation lock and rejects replacement of an existing key. Subagent events,

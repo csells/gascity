@@ -93,6 +93,16 @@ indicator is not delivery failure; a different prompt, old receipt, other native
 conversation or lost control stream cannot confirm delivery. BB still receives
 only supervisor HTTP/SSE results and never reads the private native protocol.
 
+Claude owned-command control uses its native local task controls inside GC.
+Retain foreground Bash as a native background task before interruption; the
+generic rejected-tool message can follow actual execution and proves no exit.
+Require a native turn boundary, resolved command starts, and exact task/tool
+completion notifications from the keyed transcript. Backgrounding alone never
+detaches work. Keep explicit detachment and stopped-turn fences in the session
+owner, serialize with submission, preserve attached-client drafts, and fail
+visibly for unknown native versions, tools, ownership or exit confirmation.
+Task-menu disappearance and terminal interruption are never success evidence.
+
 **TDD.** Write the test first, watch it fail, make it pass. Every package
 has `*_test.go` files next to the code. Integration tests that need real
 infrastructure (tmux, filesystem) go in `test/` with build tags.

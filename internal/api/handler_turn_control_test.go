@@ -38,8 +38,9 @@ func TestOwnedStopRefusesUnsupportedRuntimeAndMissingTurn(t *testing.T) {
 
 type turnControlProvider struct {
 	*runtime.Fake
-	request   runtime.TurnControlRequest
-	nativeKey string
+	request       runtime.TurnControlRequest
+	nativeKey     string
+	responseState string
 }
 
 func (p *turnControlProvider) ControlTurn(_ context.Context, _ string, r runtime.TurnControlRequest) (runtime.TurnTarget, error) {
@@ -50,7 +51,46 @@ func (p *turnControlProvider) ControlTurn(_ context.Context, _ string, r runtime
 	if r.TurnID != "turn-expected" {
 		return runtime.TurnTarget{}, errors.New("stale native turn")
 	}
-	return runtime.TurnTarget{Mode: "owned_commands", TurnID: r.TurnID, State: "interrupted"}, nil
+	state := p.responseState
+	if state == "" {
+		state = "interrupted"
+	}
+	return runtime.TurnTarget{Mode: "owned_commands", SessionKey: p.nativeKey, TurnID: r.TurnID, State: state}, nil
+}
+
+func TestClaudeOwnedStopPersistsOnlyConfirmedTurn(t *testing.T) {
+	fs := newSessionFakeState(t)
+	p := &turnControlProvider{Fake: fs.sp, nativeKey: "native-claude"}
+	h := newTestCityHandler(t, &stateWithSessionProvider{fakeState: fs, provider: p})
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "claude-owned")
+	for key, value := range map[string]string{"provider": "claude", "builtin_ancestor": "claude", "session_key": "native-claude"} {
+		if err := fs.cityBeadStore.SetMetadata(info.ID, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline := httptest.NewRecorder()
+	h.ServeHTTP(baseline, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/turn-target", nil))
+	if baseline.Code != http.StatusOK || p.request.ProviderKind != "claude" || !strings.Contains(baseline.Body.String(), `"mode":"owned_commands"`) {
+		t.Fatalf("Claude bypassed ownership: %d %s", baseline.Code, baseline.Body.String())
+	}
+	for _, state := range []string{"interrupted", "stopped"} {
+		p.responseState = state
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop-commands", strings.NewReader(`{"turn_id":"turn-expected"}`)))
+		want := http.StatusConflict
+		if state == "stopped" {
+			want = http.StatusOK
+		}
+		if rec.Code != want {
+			t.Fatalf("%s: %d %s", state, rec.Code, rec.Body.String())
+		}
+	}
+	// A subsequent request receives the persisted idempotence fence.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/turn-target", nil))
+	if rec.Code != http.StatusOK || !p.request.Stopped["turn-expected"] {
+		t.Fatalf("confirmed turn fence was lost: %d %+v", rec.Code, p.request)
+	}
 }
 
 func TestOwnedStopCarriesPersistedIdentityAndRejectsStaleTurn(t *testing.T) {
