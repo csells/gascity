@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -178,8 +179,31 @@ func TestNativeDeliveryConfirmsFastTurnWithoutTerminalBusy(t *testing.T) {
 		})
 	}
 	var enters int
-	confirmed, err := submitEnterAndConfirm(func() error { enters++; return nil }, func() {}, func() (bool, error) { return nativeDeliveryConfirmed(before, after, "exact prompt"), nil }, noSleep)
+	confirmed, err := submitEnterUntilNativeOrBusy(func() error { enters++; return nil }, func() {}, func() (bool, error) { return nativeDeliveryConfirmed(before, after, "exact prompt"), nil }, func() (bool, error) { return false, nil }, noSleep)
 	if err != nil || !confirmed || enters != 1 {
 		t.Fatalf("fast native turn repeated or unconfirmed: confirmed=%v enters=%d err=%v", confirmed, enters, err)
 	}
+	t.Run("busy prevents retries while native acceptance lags", func(t *testing.T) {
+		sends := 0
+		confirmed, err := submitEnterUntilNativeOrBusy(
+			func() error { sends++; return nil }, func() {},
+			func() (bool, error) { return false, nil },
+			func() (bool, error) { return true, nil }, noSleep,
+		)
+		if err != nil || confirmed || sends != 1 {
+			t.Fatalf("busy must stop retries without proving acceptance: confirmed=%v sends=%d err=%v", confirmed, sends, err)
+		}
+	})
+	t.Run("lost native control stops keys", func(t *testing.T) {
+		sends := 0
+		lost := errors.New("native control lost")
+		confirmed, err := submitEnterUntilNativeOrBusy(
+			func() error { sends++; return nil }, func() {},
+			func() (bool, error) { return false, lost },
+			func() (bool, error) { return false, nil }, noSleep,
+		)
+		if !errors.Is(err, lost) || confirmed || sends != 1 {
+			t.Fatalf("lost control must stop retries: confirmed=%v sends=%d err=%v", confirmed, sends, err)
+		}
+	})
 }

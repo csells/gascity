@@ -2973,6 +2973,13 @@ func (t *Tmux) nudgeSession(
 	if nativeErr != nil {
 		return nativeErr
 	}
+	if nativeDelivered != nil {
+		// Explicit paste boundaries avoid Codex's literal-key burst heuristic,
+		// so the owned runtime needs only Enter, never a cancellation key.
+		sendText = func(target, text string, timeout time.Duration) error {
+			return t.sendTextWithRetry(target, text, timeout, t.pasteLiteralText)
+		}
+	}
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -3007,6 +3014,9 @@ func (t *Tmux) nudgeSession(
 	// (recoverStagedDraft). Providers without a reliable indicator keep
 	// best-effort delivery.
 	submitKeys := submitKeySequence(target)
+	if nativeDelivered != nil {
+		submitKeys = []string{"Enter"}
+	}
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
 	// attempt actually submitted and the pane went busy, a re-sent Escape is an
@@ -3043,15 +3053,22 @@ func (t *Tmux) nudgeSession(
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
 		confirm := func() (bool, error) { return t.paneBusy(target) }
+		var confirmed bool
+		var err error
 		if nativeDelivered != nil {
-			confirm = nativeDelivered
+			confirmed, err = submitEnterUntilNativeOrBusy(sendSubmit, wake, nativeDelivered, confirm, time.Sleep)
+		} else {
+			confirmed, err = submitEnterAndConfirm(sendSubmit, wake, confirm, time.Sleep)
 		}
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, confirm, time.Sleep)
 		if errors.Is(err, runtime.ErrPendingInteraction) {
 			delivered = submitsSent > 0
 			return promptRefused(err)
 		}
 		if err != nil {
+			if nativeDelivered != nil && submitsSent > 0 {
+				delivered = true
+				return fmt.Errorf("%w: native acceptance: %w", ErrNudgeSubmitUnconfirmed, err)
+			}
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
 		delivered = true

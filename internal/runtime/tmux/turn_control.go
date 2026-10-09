@@ -39,6 +39,29 @@ func nativeDeliveryConfirmed(before, after codexcontrol.Target, message string) 
 	return d.SHA256 == fmt.Sprintf("%x", sha256.Sum256([]byte(message)))
 }
 
+// submitEnterUntilNativeOrBusy keeps the retry guard separate from delivery proof.
+func submitEnterUntilNativeOrBusy(send func() error, wake func(), accepted, busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+	var delivered bool
+	var probeErr error
+	_, err := submitEnterAndConfirm(send, wake, func() (bool, error) {
+		delivered, probeErr = accepted()
+		if delivered || probeErr != nil {
+			return true, nil // Stop keys on proof or lost control.
+		}
+		isBusy, err := busy()
+		if err != nil {
+			probeErr = err
+			return true, nil
+		}
+		return isBusy, nil
+	}, sleep)
+	if probeErr != nil {
+		return false, probeErr
+	}
+	// Busy prevents another submit; only the native receipt proves delivery.
+	return delivered, err
+}
+
 // nativeDeliveryProbe is used only inside the per-session nudge lock. Missing
 // adapters keep the stock terminal path; a present but broken adapter is an
 // error, not permission to guess that delivery succeeded.
