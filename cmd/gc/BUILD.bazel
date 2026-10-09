@@ -1937,6 +1937,12 @@ go_variant_test(
     name = "gc_productmetrics_testhook_test",
     args = ["-test.run=^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$"],
     gotags = ["productmetrics_testhook"],
+    # These process contracts exercise the real UID/root-owned sticky-directory
+    # trust boundary. linux-sandbox replaces /tmp with a user-owned writable
+    # mount and remaps root ownership, so it cannot represent that boundary.
+    # Keep production ownership validation intact and isolate this test in the
+    # disposable test host, while all other targets retain their usual sandbox.
+    tags = ["no-sandbox"],
     test = ":gc_test",
 )
 

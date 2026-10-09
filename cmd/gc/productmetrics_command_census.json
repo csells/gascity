@@ -3415,6 +3415,21 @@
       "id": 130
     },
     {
+      "path": "gc runtime codex",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": true,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hook-protocol",
+      "exclusion": "hook-protocol"
+    },
+    {
       "path": "gc runtime conformance",
       "aliases": [],
       "conditional_modes": [],

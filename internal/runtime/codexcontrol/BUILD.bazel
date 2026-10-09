@@ -14,11 +14,16 @@ go_library(
 go_test(
     name = "codexcontrol_test",
     srcs = [
+        "bridge_integration_test.go",
         "bridge_test.go",
         "control_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":codexcontrol"],
-    deps = ["@com_github_gorilla_websocket//:websocket"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_gorilla_websocket//:websocket",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

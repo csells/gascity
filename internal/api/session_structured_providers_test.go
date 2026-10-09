@@ -765,6 +765,11 @@ func TestHandleSessionTranscriptStructuredSkipsCodexUnknownEvents(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	// The native runtime has published its exact conversation identity.
+	info.SessionKey = "c02553e6-44a3-4f7f-a1cf-048423a07926"
+	if err := fs.cityBeadStore.SetMetadata(info.ID, "session_key", info.SessionKey); err != nil {
+		t.Fatalf("publish native identity: %v", err)
+	}
 	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "2026-06-01T00-05-00", info.SessionKey, []string{
 		`{"timestamp":"2026-06-01T00:05:01Z","type":"event_msg","payload":{"type":"shutdown_complete","data":"provider-native event"}}`,
 		`{"timestamp":"2026-06-01T00:05:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"assistant survived unknown event"}]}}`,
@@ -805,6 +810,11 @@ func TestHandleSessionTranscriptStructuredNormalizesCodexSystemErrors(t *testing
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	// The native runtime has published its exact conversation identity.
+	info.SessionKey = "5f857b88-f713-41f3-ab5b-6d837b5b55f3"
+	if err := fs.cityBeadStore.SetMetadata(info.ID, "session_key", info.SessionKey); err != nil {
+		t.Fatalf("publish native identity: %v", err)
 	}
 	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "2026-06-01T00-06-00", info.SessionKey, []string{
 		`{"timestamp":"2026-06-01T00:06:01Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,

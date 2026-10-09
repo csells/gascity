@@ -86,6 +86,9 @@ func TestProductMetricsTaggedProcessFixtureIsEnabled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	seedPrivateUploaderProcessFixture(t, home, "6ba7b810-9dad-41d1-80b4-00c04fd430c8", time.Now().UTC())
+	if _, err := gchome.InspectProductUsageHome(gchome.ResolveReadOnly()); err != nil {
+		t.Fatalf("tagged process fixture home is not trusted: %v", err)
+	}
 	service, err := productmetrics.OpenTesthook(productmetrics.TesthookOptions{
 		Home:           gchome.ResolveReadOnly(),
 		ReleaseVersion: productMetricsTestReleaseVersion,

@@ -85,12 +85,15 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-session-by-id-rename":           true,
 	"post-v0-city-by-city-name-session-by-id-reset":            true,
 	"post-v0-city-by-city-name-session-by-id-stop":             true,
-	"post-v0-city-by-city-name-session-by-id-suspend":          true,
-	"post-v0-city-by-city-name-session-by-id-wake":             true,
-	"post-v0-city-by-city-name-sling":                          true,
-	"post-v0-city-by-city-name-unregister":                     true,
-	"rotate-events":                                            true,
-	"trigger-maintenance-dolt-gc":                              true,
+	// Exact-turn control mutates existing native work; repeated requests do not create resources.
+	"post-v0-city-by-city-name-session-by-id-stop-commands":  true,
+	"post-v0-city-by-city-name-session-by-id-detach-command": true,
+	"post-v0-city-by-city-name-session-by-id-suspend":        true,
+	"post-v0-city-by-city-name-session-by-id-wake":           true,
+	"post-v0-city-by-city-name-sling":                        true,
+	"post-v0-city-by-city-name-unregister":                   true,
+	"rotate-events":                                          true,
+	"trigger-maintenance-dolt-gc":                            true,
 }
 
 type idemSpecDoc struct {

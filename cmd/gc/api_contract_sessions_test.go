@@ -82,6 +82,22 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 	c, ctx, city := h.client, h.ctx, contractCityName
 	sess := h.createAgentSession(t, "contract session")
 
+	// This harness has a legacy interrupt-only runtime. The typed capability
+	// read must say so, and exact-turn mutations must refuse unsupported work.
+	target, err := c.GetV0CityByCityNameSessionByIdTurnTargetWithResponse(ctx, city, sess.Id)
+	expectStatus(t, "session turn target", target, err, http.StatusOK)
+	if got := mustJSON(t, "session turn target", target.JSON200, target); got.Mode != "native_interrupt" {
+		t.Fatalf("legacy runtime turn target = %+v", got)
+	}
+	ownedStop, err := c.PostV0CityByCityNameSessionByIdStopCommandsWithResponse(ctx, city, sess.Id,
+		&genclient.PostV0CityByCityNameSessionByIdStopCommandsParams{XGCRequest: contractCSRF},
+		genclient.PostV0CityByCityNameSessionByIdStopCommandsJSONRequestBody{TurnId: "unsupported-turn"})
+	expectStatus(t, "unsupported owned stop", ownedStop, err, http.StatusConflict)
+	detached, err := c.PostV0CityByCityNameSessionByIdDetachCommandWithResponse(ctx, city, sess.Id,
+		&genclient.PostV0CityByCityNameSessionByIdDetachCommandParams{XGCRequest: contractCSRF},
+		genclient.PostV0CityByCityNameSessionByIdDetachCommandJSONRequestBody{TurnId: "unsupported-turn", ProcessId: ptr("unsupported-process")})
+	expectStatus(t, "unsupported command detach", detached, err, http.StatusConflict)
+
 	list, err := c.GetV0CityByCityNameSessionsWithResponse(ctx, city, &genclient.GetV0CityByCityNameSessionsParams{Template: ptr(contractAgent)})
 	expectStatus(t, "list sessions", list, err, http.StatusOK)
 	found := false
