@@ -22,7 +22,19 @@ func TestRuntimeCodexPreservesNativeOutputDescriptor(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			t.Chdir(dir)
-			script := "#!/bin/sh\nif [ \"$1\" = app-server ]; then exec cat >/dev/null; fi\nif [ \"$EXPECT_NATIVE_FILE\" = 1 ] && ! test -f /dev/stdout; then echo 'native output descriptor replaced by pipe' >&2; exit 42; fi\nprintf NATIVE_OUTPUT_PRESERVED\n"
+			// Session staging reintroduces the core overlay's unbound hooks.
+			// Native startup must see the reviewed, city-bound bytes instead.
+			installCodex(t, dir, dir)
+			reviewed, err := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reviewed-hooks.json"), reviewed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stageCodex(t, seedCodexOverlay(t), dir, false)
+			t.Setenv("GC_CITY_PATH", dir)
+			script := "#!/bin/sh\ncmp .codex/hooks.json reviewed-hooks.json >/dev/null || { echo unreviewed-startup-hooks >&2; exit 43; }\nif [ \"$1\" = app-server ]; then exec cat >/dev/null; fi\nif [ \"$EXPECT_NATIVE_FILE\" = 1 ] && ! test -f /dev/stdout; then echo 'native output descriptor replaced by pipe' >&2; exit 42; fi\nprintf NATIVE_OUTPUT_PRESERVED\n"
 			if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}

@@ -22,6 +22,12 @@ The public API remains GC's supervisor. Main conversation identity comes only
 from a correlated non-ephemeral native start/resume response; a temporary title
 thread cannot replace it.
 
+Before provisioning persistent Codex resumes, review and trust the generated
+GC hooks using native Codex configuration. Temporary hook-bypass flags do not
+apply to persistent resumes. The GC launch finalizes existing hook files after
+session overlay staging so their reviewed hashes remain stable; it never grants
+hook trust or removes custom hooks.
+
 ## Build and verification
 
 Apply `codex.patch` to a clean checkout of the exact base commit. The patch

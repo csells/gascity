@@ -77,6 +77,10 @@ Native interactive runtime commands must preserve their injected terminal file
 descriptors through the real CLI entrypoint. CLI output wrappers passed directly
 to `os/exec` become pipes and can prevent a TUI from starting. Preserve explicit
 capture writers too; do not replace injected streams with process globals.
+The owned Codex launch must also finalize existing GC hook files after session
+staging and before either native child starts. Transient hook rewrites are
+observable consent changes; a later reconciler tick cannot repair an already
+blocked native resume. Preserve custom hooks and native trust decisions.
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
 has `*_test.go` files next to the code. Integration tests that need real
