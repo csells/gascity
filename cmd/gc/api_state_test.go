@@ -4929,3 +4929,81 @@ func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *test
 		}
 	}
 }
+
+// A reload of the previous accepted mutation may still be publishing while
+// the next patch is written. A rejected patch must never become the cached
+// raw config, even transiently between its write and rollback.
+func TestControllerStateRejectedPatchCannotPoisonRawSnapshotDuringReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	original := []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "city1"}}, sp, events.NewFake(), "city1", cityDir)
+	cfg, revision, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.update(cfg, sp)
+	cs.markConfigMutationPending(revision)
+
+	written := make(chan error, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.mutateAndPoke(func() error {
+			err := cs.editor.SetAgentPatch(config.AgentPatch{Dir: "alpha", Name: "missing", Env: map[string]string{"REJECTED": "1"}})
+			written <- err
+			if err != nil {
+				return err
+			}
+			<-release
+			return nil
+		})
+	}()
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	reloadDone := make(chan bool, 1)
+	go func() { reloadDone <- cs.updateFromRuntime(cfg, sp, revision) }()
+	// Give the reload an opportunity to observe the unvalidated disk write.
+	// A correctly serialized reload waits until the rejected mutation rolls back.
+	var published bool
+	select {
+	case published = <-reloadDone:
+		reloadDone = nil
+	case <-time.After(2 * time.Second):
+	}
+	unblock()
+	if err := <-mutationDone; err == nil {
+		t.Fatal("patch to a missing target was accepted")
+	}
+	if reloadDone != nil {
+		select {
+		case published = <-reloadDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("reload did not finish after rollback")
+		}
+	}
+	if !published {
+		t.Fatal("the prior accepted config was not published")
+	}
+	if got, err := os.ReadFile(tomlPath); err != nil || string(got) != string(original) {
+		t.Fatalf("rollback disk config = %q, err=%v", got, err)
+	}
+	raw := cs.RawConfig()
+	if raw == nil {
+		t.Fatal("raw config missing after rollback")
+	}
+	if len(raw.Patches.Agents) != 0 {
+		t.Fatalf("rejected patch leaked into the API raw snapshot: %+v", raw.Patches.Agents)
+	}
+}
