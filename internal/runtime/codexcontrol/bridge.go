@@ -471,15 +471,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if !info.IsDir() || info.Mode().Perm() != 0o700 {
 		return errors.New("unsafe native-control socket directory")
 	}
-	rl, err := net.Listen("unix", rpc)
+	rl, cl, err := listenNativeSockets(rpc, control)
 	if err != nil {
 		return err
 	}
 	defer closeWithError(&runErr, "closing native RPC listener", rl)
-	cl, err := net.Listen("unix", control)
-	if err != nil {
-		return err
-	}
 	defer closeWithError(&runErr, "closing native control listener", cl)
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -84,6 +84,9 @@ blocked native resume. Preserve custom hooks and native trust decisions.
 For remote Codex resumes, transfer explicit approval/sandbox flags through the
 native resume API and verify its effective response before binding the session.
 Never silently drop unsupported permission overrides or accept a mismatch.
+Native socket restart may reclaim only a confirmed non-listening Unix socket,
+under the directory's kernel creation lock. Preserve live listeners, non-socket
+paths and uncertain probes. Handle terminal hangup through graceful cancellation.
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
 has `*_test.go` files next to the code. Integration tests that need real

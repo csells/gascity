@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "bridge.go",
         "control.go",
+        "sockets_unix.go",
+        "sockets_windows.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/codexcontrol",
     visibility = ["//:__subpackages__"],
@@ -17,6 +19,7 @@ go_test(
         "bridge_integration_test.go",
         "bridge_test.go",
         "control_test.go",
+        "sockets_integration_test.go",
         "testenv_import_test.go",
     ],
     embed = [":codexcontrol"],

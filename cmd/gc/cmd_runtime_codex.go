@@ -33,7 +33,7 @@ func newRuntimeCodexCmd(stdout, stderr io.Writer) *cobra.Command {
 		if err := prepareRuntimeCodexHooks(args); err != nil {
 			return err
 		}
-		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer cancel()
 		return codexcontrol.Run(ctx, args, os.Stdin, runtimeCodexOutput(stdout), runtimeCodexOutput(stderr))
 	}}

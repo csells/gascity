@@ -104,3 +104,7 @@ its mutation lock and rejects replacement of an existing key. Subagent events,
 filesystem recency and other runtimes cannot supply this identity. Before a
 startup reply, a first-turn baseline may omit the key only when no turn started;
 Stop/detach still require a bound conversation.
+
+A failed resume, including immediate post-start death, must use the same
+conversation-preservation policy as advisory runtime loss. A stale-key retry
+is not authorization to reset a committed manual or always-named conversation.
