@@ -87,6 +87,11 @@ Never silently drop unsupported permission overrides or accept a mismatch.
 Native socket restart may reclaim only a confirmed non-listening Unix socket,
 under the directory's kernel creation lock. Preserve live listeners, non-socket
 paths and uncertain probes. Handle terminal hangup through graceful cancellation.
+Native Codex submit acknowledgement must use a new, exact accepted user-message
+identity and digest when the owned adapter is available. A missed terminal busy
+indicator is not delivery failure; a different prompt, old receipt, other native
+conversation or lost control stream cannot confirm delivery. BB still receives
+only supervisor HTTP/SSE results and never reads the private native protocol.
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
 has `*_test.go` files next to the code. Integration tests that need real

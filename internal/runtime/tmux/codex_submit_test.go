@@ -1,10 +1,14 @@
 package tmux
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime/codexcontrol"
 )
 
 // nudgeKeystrokesForFamily composes the keys a nudge actually puts into a pane,
@@ -146,4 +150,36 @@ func nudgeSessionSource(t *testing.T) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+func TestNativeDeliveryConfirmsFastTurnWithoutTerminalBusy(t *testing.T) {
+	before := codexcontrol.Target{ThreadID: "thread", TurnID: "previous", State: "completed", Delivery: &codexcontrol.Delivery{TurnID: "previous", ItemID: "old", SHA256: "old"}}
+	after := codexcontrol.Target{ThreadID: "thread", TurnID: "quick", State: "completed", Delivery: &codexcontrol.Delivery{TurnID: "quick", ItemID: "new", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("exact prompt")))}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*codexcontrol.Target)
+		want   bool
+	}{
+		{"fast completed turn", func(*codexcontrol.Target) {}, true},
+		{"different thread", func(a *codexcontrol.Target) { a.ThreadID = "other" }, false},
+		{"old item", func(a *codexcontrol.Target) { a.Delivery.ItemID = "old" }, false},
+		{"different prompt", func(a *codexcontrol.Target) { a.Delivery.SHA256 = "different" }, false},
+		{"missing proof", func(a *codexcontrol.Target) { a.Delivery = nil }, false},
+		{"lost native stream", func(a *codexcontrol.Target) { a.State = "unconfirmed" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := after
+			d := *after.Delivery
+			a.Delivery = &d
+			tc.mutate(&a)
+			if got := nativeDeliveryConfirmed(before, a, "exact prompt"); got != tc.want {
+				t.Fatalf("confirmed=%v want %v", got, tc.want)
+			}
+		})
+	}
+	var enters int
+	confirmed, err := submitEnterAndConfirm(func() error { enters++; return nil }, func() {}, func() (bool, error) { return nativeDeliveryConfirmed(before, after, "exact prompt"), nil }, noSleep)
+	if err != nil || !confirmed || enters != 1 {
+		t.Fatalf("fast native turn repeated or unconfirmed: confirmed=%v enters=%d err=%v", confirmed, enters, err)
+	}
 }

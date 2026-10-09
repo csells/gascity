@@ -254,6 +254,8 @@ func (e *attachProbeFailsExecutor) execute(args []string) (string, error) {
 		return "", errors.New("server busy")
 	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_PROVIDER"):
 		return "GC_PROVIDER=codex", nil
+	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_INSTANCE_TOKEN"):
+		return "-GC_INSTANCE_TOKEN", nil
 	case slices.Contains(args, "capture-pane"):
 		return "› [Pasted Content 120 chars]", nil
 	}

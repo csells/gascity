@@ -2969,6 +2969,10 @@ func (t *Tmux) nudgeSession(
 	if err := checkPrompt(); err != nil {
 		return err
 	}
+	nativeDelivered, nativeErr := t.nativeDeliveryProbe(session, message)
+	if nativeErr != nil {
+		return nativeErr
+	}
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -3038,7 +3042,11 @@ func (t *Tmux) nudgeSession(
 	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		confirm := func() (bool, error) { return t.paneBusy(target) }
+		if nativeDelivered != nil {
+			confirm = nativeDelivered
+		}
+		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, confirm, time.Sleep)
 		if errors.Is(err, runtime.ErrPendingInteraction) {
 			delivered = submitsSent > 0
 			return promptRefused(err)
@@ -3047,6 +3055,22 @@ func (t *Tmux) nudgeSession(
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
 		delivered = true
+		if !confirmed && nativeDelivered != nil {
+			// Wait for native acceptance without injecting another prompt or trusting
+			// unrelated terminal chrome. Keep the historical recovery time budget.
+			deadline := time.Now().Add(submitDraftRecoverySends * submitDraftRecoveryBackoff)
+			for time.Now().Before(deadline) {
+				accepted, probeErr := nativeDelivered()
+				if probeErr != nil {
+					return fmt.Errorf("%w: native acceptance: %w", ErrNudgeSubmitUnconfirmed, probeErr)
+				}
+				if accepted {
+					return nil
+				}
+				time.Sleep(submitConfirmPollInterval)
+			}
+			return fmt.Errorf("%w: session %q has no exact native message acceptance", ErrNudgeSubmitUnconfirmed, session)
+		}
 		if !confirmed {
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the

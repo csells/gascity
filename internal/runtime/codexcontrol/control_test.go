@@ -177,3 +177,52 @@ func TestStopRequiresNativeStartBarrierEvenWithNoObservedCommands(t *testing.T) 
 		t.Fatal("empty inventory substituted for unsupported native barrier")
 	}
 }
+
+func TestNativeUserMessageDeliverySurvivesFastCompletion(t *testing.T) {
+	c := New(nil)
+	for _, e := range []struct{ method, data string }{
+		{"turn/started", `{"threadId":"thread","turn":{"id":"quick","status":"inProgress"}}`},
+		{"item/completed", `{"threadId":"thread","turnId":"quick","item":{"type":"userMessage","id":"accepted","content":[{"type":"text","text":"exact prompt"}]}}`},
+		{"turn/completed", `{"threadId":"thread","turn":{"id":"quick","status":"completed"}}`},
+	} {
+		if err := c.Observe(e.method, json.RawMessage(e.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := c.Target("thread")
+	if got.Delivery == nil || got.Delivery.ItemID != "accepted" || got.Delivery.TurnID != "quick" || got.Delivery.SHA256 != "eed1d81b1a386e05e946a46581d3a07f3a1be21fb4ff482de024318f1fab19e9" {
+		t.Fatalf("native accepted-message proof missing: %#v", got)
+	}
+	if c.Target("other").Delivery != nil {
+		t.Fatal("another conversation inherited delivery proof")
+	}
+}
+
+func TestNativeDeliveryRejectsUnsupportedAndHistoricalItems(t *testing.T) {
+	for _, item := range []string{
+		`{"type":"userMessage","id":"x","content":[{"type":"image","text":"not text"}]}`,
+		`{"type":"userMessage","id":"x","content":[{"type":"text","text":"partial"},{"type":"image"}]}`,
+		`{"type":"userMessage","id":"","content":[{"type":"text","text":"unidentified"}]}`,
+	} {
+		c := New(nil)
+		if err := c.Observe("turn/started", json.RawMessage(`{"threadId":"thread","turn":{"id":"turn","status":"inProgress"}}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Observe("item/completed", json.RawMessage(`{"threadId":"thread","turnId":"turn","item":`+item+`}`)); err != nil {
+			t.Fatal(err)
+		}
+		if c.Target("thread").Delivery != nil {
+			t.Fatal("unsupported input became exact-text proof")
+		}
+	}
+	c := New(nil)
+	if err := c.Observe("turn/started", json.RawMessage(`{"threadId":"thread","turn":{"id":"current","status":"inProgress"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Observe("item/completed", json.RawMessage(`{"threadId":"thread","turnId":"old","item":{"type":"userMessage","id":"old-item","content":[{"type":"text","text":"same prompt"}]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if c.Target("thread").Delivery != nil {
+		t.Fatal("historical input became current delivery proof")
+	}
+}

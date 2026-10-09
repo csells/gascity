@@ -126,6 +126,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/acp",
         "//internal/runtime/auto",
+        "//internal/runtime/codexcontrol",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",

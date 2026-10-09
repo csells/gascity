@@ -3,6 +3,7 @@ package codexcontrol
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +18,17 @@ type Peer interface {
 
 // Target is a fenced cancellation target. TurnID must be echoed by the caller.
 type Target struct {
-	ThreadID string `json:"thread_id"`
-	TurnID   string `json:"turn_id"`
-	State    string `json:"state"`
+	ThreadID string    `json:"thread_id"`
+	TurnID   string    `json:"turn_id"`
+	State    string    `json:"state"`
+	Delivery *Delivery `json:"delivery,omitempty"`
+}
+
+// Delivery proves a specific native user message was accepted, not completed.
+type Delivery struct {
+	TurnID string `json:"turn_id"`
+	ItemID string `json:"item_id"`
+	SHA256 string `json:"sha256"`
 }
 type command struct {
 	item, turn       string
@@ -29,6 +38,7 @@ type thread struct {
 	current, status     string
 	pending             int
 	stopping, uncertain bool
+	delivery            *Delivery
 	commands            map[string]command
 	stopped             map[string]bool
 }
@@ -78,7 +88,8 @@ func (c *Controller) Observe(method string, raw json.RawMessage) error {
 		Turn     struct{ ID, Status string } `json:"turn"`
 		Item     struct {
 			Type, ID, ProcessID, Status string
-			ExitCode                    *int `json:"exitCode"`
+			ExitCode                    *int                          `json:"exitCode"`
+			Content                     []struct{ Type, Text string } `json:"content"`
 		} `json:"item"`
 	}
 	if err := json.Unmarshal(raw, &e); err != nil {
@@ -109,6 +120,13 @@ func (c *Controller) Observe(method string, raw json.RawMessage) error {
 			t.status = e.Turn.Status
 		}
 	default:
+		// Native user-message acceptance is authoritative even if the entire turn
+		// finishes between terminal busy-indicator samples. Record identity and a
+		// digest only; never expose prompt text through the private control socket.
+		if e.Item.Type == "userMessage" && e.Item.ID != "" && e.TurnID != "" && e.TurnID == t.current && len(e.Item.Content) == 1 && e.Item.Content[0].Type == "text" && e.Item.Content[0].Text != "" {
+			t.delivery = &Delivery{TurnID: e.TurnID, ItemID: e.Item.ID, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(e.Item.Content[0].Text)))}
+			return nil
+		}
 		if e.Item.Type != "commandExecution" || e.Item.ProcessID == "" {
 			return nil
 		}
@@ -160,7 +178,12 @@ func (c *Controller) Target(id string) Target {
 	case t.current == "":
 		state = "idle"
 	}
-	return Target{ThreadID: id, TurnID: t.current, State: state}
+	var delivery *Delivery
+	if t.delivery != nil {
+		snapshot := *t.delivery
+		delivery = &snapshot
+	}
+	return Target{ThreadID: id, TurnID: t.current, State: state, Delivery: delivery}
 }
 
 // Detach explicitly transfers a command out of automatic turn cancellation.
