@@ -3073,18 +3073,14 @@ func (t *Tmux) nudgeSession(
 		}
 		delivered = true
 		if !confirmed && nativeDelivered != nil {
-			// Wait for native acceptance without injecting another prompt or trusting
-			// unrelated terminal chrome. Keep the historical recovery time budget.
-			deadline := time.Now().Add(submitDraftRecoverySends * submitDraftRecoveryBackoff)
-			for time.Now().Before(deadline) {
-				accepted, probeErr := nativeDelivered()
-				if probeErr != nil {
-					return fmt.Errorf("%w: native acceptance: %w", ErrNudgeSubmitUnconfirmed, probeErr)
-				}
-				if accepted {
-					return nil
-				}
-				time.Sleep(submitConfirmPollInterval)
+			// Observe exact native acceptance without sending more input. Native
+			// queue/start latency is independent of terminal paste recovery.
+			accepted, probeErr := waitForNativeDelivery(nativeDelivered, time.Now, time.Sleep)
+			if probeErr != nil {
+				return fmt.Errorf("%w: native acceptance: %w", ErrNudgeSubmitUnconfirmed, probeErr)
+			}
+			if accepted {
+				return nil
 			}
 			return fmt.Errorf("%w: session %q has no exact native message acceptance", ErrNudgeSubmitUnconfirmed, session)
 		}

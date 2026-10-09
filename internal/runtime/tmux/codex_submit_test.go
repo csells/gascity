@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime/codexcontrol"
 )
@@ -204,6 +205,31 @@ func TestNativeDeliveryConfirmsFastTurnWithoutTerminalBusy(t *testing.T) {
 		)
 		if !errors.Is(err, lost) || confirmed || sends != 1 {
 			t.Fatalf("lost control must stop retries: confirmed=%v sends=%d err=%v", confirmed, sends, err)
+		}
+	})
+	t.Run("delayed native receipt survives terminal recovery budget", func(t *testing.T) {
+		start := time.Unix(0, 0)
+		clock := start
+		calls := 0
+		confirmed, err := waitForNativeDelivery(func() (bool, error) {
+			calls++
+			return clock.Sub(start) >= 11*time.Second, nil
+		}, func() time.Time { return clock }, func(d time.Duration) { clock = clock.Add(d) })
+		if err != nil || !confirmed || clock.Sub(start) < 11*time.Second || calls < 2 {
+			t.Fatalf("delayed receipt rejected: confirmed=%v elapsed=%v err=%v", confirmed, clock.Sub(start), err)
+		}
+	})
+	t.Run("native acceptance wait is bounded and propagates loss", func(t *testing.T) {
+		start := time.Unix(0, 0)
+		clock := start
+		confirmed, err := waitForNativeDelivery(func() (bool, error) { return false, nil }, func() time.Time { return clock }, func(d time.Duration) { clock = clock.Add(d) })
+		if err != nil || confirmed || clock.Sub(start) < nativeDeliveryTimeout || clock.Sub(start) > nativeDeliveryTimeout+submitConfirmPollInterval {
+			t.Fatalf("unconfirmed receipt wait unbounded: confirmed=%v elapsed=%v err=%v", confirmed, clock.Sub(start), err)
+		}
+		lost := errors.New("native receipt connection lost")
+		confirmed, err = waitForNativeDelivery(func() (bool, error) { return false, lost }, func() time.Time { return clock }, func(time.Duration) { t.Fatal("waited after losing native control") })
+		if confirmed || !errors.Is(err, lost) {
+			t.Fatalf("lost control hidden: confirmed=%v err=%v", confirmed, err)
 		}
 	})
 }

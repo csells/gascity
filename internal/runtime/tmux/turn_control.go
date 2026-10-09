@@ -62,6 +62,22 @@ func submitEnterUntilNativeOrBusy(send func() error, wake func(), accepted, busy
 	return delivered, err
 }
 
+// Native acceptance may follow turn/start by seconds while the provider queues
+// input or initializes the next inference. This is not a terminal paste budget.
+const nativeDeliveryTimeout = 60 * time.Second
+
+func waitForNativeDelivery(accepted func() (bool, error), now func() time.Time, sleep func(time.Duration)) (bool, error) {
+	deadline := now().Add(nativeDeliveryTimeout)
+	for now().Before(deadline) {
+		ok, err := accepted()
+		if ok || err != nil {
+			return ok, err
+		}
+		sleep(submitConfirmPollInterval)
+	}
+	return false, nil
+}
+
 // nativeDeliveryProbe is used only inside the per-session nudge lock. Missing
 // adapters keep the stock terminal path; a present but broken adapter is an
 // error, not permission to guess that delivery succeeded.
