@@ -84,6 +84,13 @@ func TestClaudeOwnedStopPersistsOnlyConfirmedTurn(t *testing.T) {
 		if rec.Code != want {
 			t.Fatalf("%s: %d %s", state, rec.Code, rec.Body.String())
 		}
+		if state == "interrupted" {
+			pending := httptest.NewRecorder()
+			h.ServeHTTP(pending, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/turn-target", nil))
+			if pending.Code != http.StatusOK || !strings.Contains(pending.Body.String(), `"state":"unconfirmed"`) {
+				t.Fatalf("unconfirmed explicit Stop lost its durable fence: %d %s", pending.Code, pending.Body.String())
+			}
+		}
 	}
 	// A subsequent request receives the persisted idempotence fence.
 	rec := httptest.NewRecorder()

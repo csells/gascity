@@ -103,6 +103,9 @@ boundary, with exact keyed task/tool completion records as exit proof. The
 session owner alone persists explicit detachments and confirmed stopped turns;
 neither terminal interruption nor a generic rejected-tool result can persist a
 successful command Stop. Preserve that fence across supervisor restarts.
+Persist explicit Stop intent before native mutation, and clear its uncertainty
+only after confirmed termination. Ordinary permission denial must still allow a
+follow-up; a generic rejected-tool result alone is not an unresolved Stop intent.
 An exact runtime incarnation can publish its native conversation key through a
 correlated native start/resume reply. The session owner persists that proof under
 its mutation lock and rejects replacement of an existing key. Subagent events,

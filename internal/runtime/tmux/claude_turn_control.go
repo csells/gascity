@@ -61,13 +61,6 @@ func (p *Provider) controlClaudeTurn(ctx context.Context, name string, req runti
 	if req.Stopped[s.TurnID] {
 		target.State = "stopped"
 	}
-	if s.Boundaries[s.TurnID] {
-		for _, owner := range s.Pending {
-			if owner == s.TurnID {
-				target.State = "unconfirmed"
-			}
-		}
-	}
 	if req.Action == "target" {
 		return target, nil
 	}

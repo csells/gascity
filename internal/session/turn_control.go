@@ -23,7 +23,20 @@ func (m *Manager) ControlTurn(ctx context.Context, id string, req runtime.TurnCo
 			return nil
 		}
 		req.SessionKey = b.Metadata["session_key"]
-		var ownership struct{ Detached, Stopped map[string]bool }
+		var ownership struct {
+			Detached, Stopped map[string]bool
+			Pending           string
+		}
+		persistOwnership := func() error {
+			encoded, encodeErr := json.Marshal(ownership)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if err := m.store.SetMetadata(id, "claude_command_ownership", string(encoded)); err != nil {
+				return fmt.Errorf("persisting command ownership: %w", err)
+			}
+			return nil
+		}
 		if claude {
 			req.ProviderKind = "claude"
 			req.TranscriptPath = ResolveKeyedTranscriptPath(infoFromPersistedBead(b), nil)
@@ -51,6 +64,25 @@ func (m *Manager) ControlTurn(ctx context.Context, id string, req runtime.TurnCo
 		if !ok {
 			return fmt.Errorf("%w: owned command control unavailable", runtime.ErrInteractionUnsupported)
 		}
+		if claude && req.Action == "stop" && !ownership.Stopped[req.TurnID] {
+			probe := req
+			probe.Action = "target"
+			current, err := control.ControlTurn(ctx, name, probe)
+			if err != nil {
+				return err
+			}
+			if req.TurnID == "" || current.TurnID != req.TurnID || current.SessionKey != req.SessionKey || current.Mode != "owned_commands" {
+				return fmt.Errorf("stale or unconfirmed native turn; no Stop was sent")
+			}
+			// Persist intent before native mutation. A failed operation or
+			// supervisor crash cannot turn uncertain cancellation into success.
+			// Ordinary permission denial has no Stop intent and does not acquire
+			// this fence merely because its native result is a rejection string.
+			ownership.Pending = req.TurnID
+			if err := persistOwnership(); err != nil {
+				return err
+			}
+		}
 		target, e = control.ControlTurn(ctx, name, req)
 		if e != nil {
 			return e
@@ -65,21 +97,23 @@ func (m *Manager) ControlTurn(ctx context.Context, id string, req runtime.TurnCo
 				}
 			}
 		}
+		if claude && req.Action == "target" && ownership.Pending != "" && ownership.Pending == target.TurnID && !ownership.Stopped[target.TurnID] {
+			target.State = "unconfirmed"
+		}
 		if claude && (req.Action == "stop" || req.Action == "detach") {
 			if target.TurnID != req.TurnID || (req.Action == "stop" && target.State != "stopped") {
 				return fmt.Errorf("native command control did not confirm the requested turn")
 			}
 			if req.Action == "stop" {
 				ownership.Stopped[req.TurnID] = true
+				if ownership.Pending == req.TurnID {
+					ownership.Pending = ""
+				}
 			} else {
 				ownership.Detached[req.TurnID+":"+req.ProcessID] = true
 			}
-			encoded, encodeErr := json.Marshal(ownership)
-			if encodeErr != nil {
-				return encodeErr
-			}
-			if e = m.store.SetMetadata(id, "claude_command_ownership", string(encoded)); e != nil {
-				return fmt.Errorf("persisting command ownership: %w", e)
+			if err := persistOwnership(); err != nil {
+				return err
 			}
 		}
 		return nil
