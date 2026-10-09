@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -174,8 +175,8 @@ func TestCommittedConversationStartupFailurePreservesIdentity(t *testing.T) {
 			} else {
 				err = mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 			}
-			if err == nil {
-				t.Fatal("failed resume reported success")
+			if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) || !errors.Is(err, ErrResumeRequired) {
+				t.Fatalf("resume must retain both startup-death and preservation errors: %v", err)
 			}
 			b, e := store.Get(id)
 			if e != nil {
@@ -209,8 +210,8 @@ func TestCommittedConversationImmediateExitPreservesIdentity(t *testing.T) {
 			} else {
 				err = mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 			}
-			if err == nil {
-				t.Fatal("immediate exit reported success")
+			if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) || !errors.Is(err, ErrResumeRequired) {
+				t.Fatalf("exit must retain both startup-death and preservation errors: %v", err)
 			}
 			b, e := store.Get(id)
 			if e != nil {

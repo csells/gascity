@@ -286,7 +286,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		if unroute != nil {
 			unroute()
 		}
-		return false, fmt.Errorf("retaining committed conversation after failed resume: %w", ErrResumeRequired)
+		return false, fmt.Errorf("retaining committed conversation after failed resume: %w: %w", ErrResumeRequired, runtime.ErrSessionDiedDuringStartup)
 	}
 	// An empty session_key does not mean there is nothing to recover. The
 	// command can still carry a generated resume shape, because it was built
