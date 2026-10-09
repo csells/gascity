@@ -88,17 +88,19 @@ type route struct {
 	finish          func()
 }
 type bridge struct {
-	nativeThread string
-	input        io.WriteCloser
-	writeMu      sync.Mutex
-	mu           sync.Mutex
-	routes       map[string]route
-	client       *websocket.Conn
-	clientMu     sync.Mutex
-	sequence     atomic.Uint64
-	controller   *Controller
-	done         chan struct{}
-	once         sync.Once
+	resumePermissions resumePermissions
+	failure           error
+	nativeThread      string
+	input             io.WriteCloser
+	writeMu           sync.Mutex
+	mu                sync.Mutex
+	routes            map[string]route
+	client            *websocket.Conn
+	clientMu          sync.Mutex
+	sequence          atomic.Uint64
+	controller        *Controller
+	done              chan struct{}
+	once              sync.Once
 }
 
 func (b *bridge) send(e envelope) error {
@@ -128,6 +130,9 @@ func (b *bridge) forward(e envelope) error {
 
 func (b *bridge) fail(err error) {
 	b.once.Do(func() {
+		b.mu.Lock()
+		b.failure = err
+		b.mu.Unlock()
 		b.controller.Fail(err)
 		close(b.done)
 		b.mu.Lock()
@@ -206,6 +211,12 @@ func (b *bridge) readNative(output io.Reader) {
 					b.fail(err)
 					return
 				}
+				if r.method == "thread/resume" {
+					if err := b.resumePermissions.verify(e.Result); err != nil {
+						b.fail(err)
+						return
+					}
+				}
 				if err := b.bindNativeThread(result.Thread.ID, r.requestedThread); err != nil {
 					b.fail(err)
 					return
@@ -259,6 +270,14 @@ func (b *bridge) serveClient(c *websocket.Conn, output io.Reader) {
 		if err := c.ReadJSON(&e); err != nil {
 			b.fail(err)
 			return
+		}
+		if e.Method == "thread/resume" && len(e.ID) > 0 {
+			params, err := b.resumePermissions.apply(e.Params)
+			if err != nil {
+				b.fail(err)
+				return
+			}
+			e.Params = params
 		}
 		if e.Method != "" && len(e.ID) > 0 {
 			var finish func()
@@ -433,6 +452,10 @@ func Control(ctx context.Context, name, token string, req Request) (result Reply
 
 // Run launches a native Codex app-server and its TUI with retained command ownership.
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (runErr error) {
+	args, permissions, err := prepareResumePermissions(args)
+	if err != nil {
+		return err
+	}
 	rpc, control, err := SocketPaths(os.Getenv("GC_SESSION_NAME"), os.Getenv("GC_INSTANCE_TOKEN"))
 	if err != nil {
 		return err
@@ -482,7 +505,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if err = native.Start(); err != nil {
 		return err
 	}
-	b := &bridge{input: input, routes: map[string]route{}, done: make(chan struct{})}
+	b := &bridge{input: input, routes: map[string]route{}, done: make(chan struct{}), resumePermissions: permissions}
 	b.controller = New(b)
 	go func() {
 		select {
@@ -522,7 +545,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	cancel()
 	nativeErr := native.Wait()
 	if tuiErr != nil {
-		return fmt.Errorf("native Codex TUI: %w", tuiErr)
+		b.mu.Lock()
+		failure := b.failure
+		b.mu.Unlock()
+		return errors.Join(fmt.Errorf("native Codex TUI: %w", tuiErr), failure)
 	}
 	if nativeErr != nil && ctx.Err() != nil {
 		return ctx.Err()
@@ -536,4 +562,140 @@ func closeWithError(result *error, label string, closer io.Closer) {
 	if err := closer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		*result = errors.Join(*result, fmt.Errorf("%s: %w", label, err))
 	}
+}
+
+// resumePermissions carries explicit CLI permissions over the native API.
+// Codex's remote TUI rejects these flags on resume before issuing any request.
+type resumePermissions struct{ approval, sandbox string }
+
+func prepareResumePermissions(args []string) ([]string, resumePermissions, error) {
+	takesValue := func(key string) bool {
+		switch key {
+		case "--model", "-m", "--config", "-c", "--cd", "-C", "--image", "-i", "--profile", "-p", "--sandbox", "-s", "--ask-for-approval", "-a", "--add-dir", "--local-provider":
+			return true
+		}
+		return false
+	}
+	resume := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		if args[i] == "resume" {
+			resume = true
+			break
+		}
+		if takesValue(args[i]) {
+			i++
+		}
+	}
+	if !resume {
+		return args, resumePermissions{}, nil
+	}
+	var p resumePermissions
+	var out []string
+	bypass := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		key, value, inline := strings.Cut(arg, "=")
+		start := i
+		if takesValue(key) && !inline {
+			if i+1 == len(args) {
+				return nil, p, fmt.Errorf("native Codex resume: %s requires a value", key)
+			}
+			i++
+			value = args[i]
+		}
+		switch key {
+		case "--dangerously-bypass-approvals-and-sandbox", "--yolo":
+			if inline {
+				return nil, p, errors.New("native Codex resume: bypass flag does not accept a value")
+			}
+			bypass = true
+		case "--sandbox", "-s":
+			if p.sandbox != "" {
+				return nil, p, errors.New("native Codex resume: duplicate sandbox flag")
+			}
+			switch value {
+			case "read-only", "workspace-write", "danger-full-access":
+				p.sandbox = value
+			default:
+				return nil, p, fmt.Errorf("native Codex resume: invalid sandbox %q", value)
+			}
+		case "--ask-for-approval", "-a":
+			if p.approval != "" {
+				return nil, p, errors.New("native Codex resume: duplicate approval flag")
+			}
+			switch value {
+			case "untrusted", "on-failure", "on-request", "never":
+				p.approval = value
+			default:
+				return nil, p, fmt.Errorf("native Codex resume: invalid approval policy %q", value)
+			}
+		case "--profile", "-p", "--add-dir", "--approve-for-me", "--not-so-yolo", "--full-auto":
+			return nil, p, fmt.Errorf("native Codex resume: %s is not supported by this runtime adapter; use explicit --sandbox and --ask-for-approval", key)
+		case "--config", "-c":
+			configKey, _, _ := strings.Cut(value, "=")
+			root, _, _ := strings.Cut(strings.Trim(strings.TrimSpace(configKey), "\"'"), ".")
+			switch root {
+			case "approval_policy", "approvals_reviewer", "sandbox_mode", "default_permissions", "permissions", "network", "sandbox_workspace_write":
+				return nil, p, fmt.Errorf("native Codex resume: permission config %q requires an explicit supported permission flag", root)
+			}
+			out = append(out, args[start:i+1]...)
+		default:
+			out = append(out, args[start:i+1]...)
+		}
+	}
+	// Native Codex gives its bypass flag precedence over explicit -a/-s.
+	if bypass {
+		p = resumePermissions{approval: "never", sandbox: "danger-full-access"}
+	}
+	return out, p, nil
+}
+
+func (p resumePermissions) apply(raw json.RawMessage) (json.RawMessage, error) {
+	if p == (resumePermissions{}) {
+		return raw, nil
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, err
+	}
+	if params == nil {
+		return nil, errors.New("native resume parameters missing")
+	}
+	if p.approval != "" {
+		params["approvalPolicy"] = json.RawMessage(strconv.Quote(p.approval))
+	}
+	if p.sandbox != "" {
+		if value := params["permissions"]; len(value) > 0 && string(value) != "null" {
+			return nil, errors.New("native resume combines a permission profile and explicit sandbox")
+		}
+		params["sandbox"] = json.RawMessage(strconv.Quote(p.sandbox))
+	}
+	return json.Marshal(params)
+}
+
+func (p resumePermissions) verify(raw json.RawMessage) error {
+	if p == (resumePermissions{}) {
+		return nil
+	}
+	var result struct {
+		Approval string `json:"approvalPolicy"`
+		Sandbox  struct {
+			Type string `json:"type"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return err
+	}
+	expected := map[string]string{"danger-full-access": "dangerFullAccess", "read-only": "readOnly", "workspace-write": "workspaceWrite"}[p.sandbox]
+	if (p.approval != "" && result.Approval != p.approval) || (p.sandbox != "" && result.Sandbox.Type != expected) {
+		return errors.New("native Codex resume did not confirm the requested approval and sandbox settings")
+	}
+	return nil
 }

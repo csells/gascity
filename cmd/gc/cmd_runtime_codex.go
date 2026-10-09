@@ -19,7 +19,14 @@ import (
 
 // newRuntimeCodexCmd starts an opt-in Codex runtime with native command ownership.
 func newRuntimeCodexCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "codex -- [codex arguments]", Short: "Run Codex with GC-owned command cancellation", DisableFlagParsing: true, RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "codex -- [codex arguments]", Short: "Run Codex with GC-owned command cancellation", DisableFlagParsing: true, RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() {
+			if runErr != nil {
+				if _, err := fmt.Fprintf(stderr, "gc runtime codex: %v\n", runErr); err != nil {
+					runErr = errors.Join(runErr, err)
+				}
+			}
+		}()
 		if len(args) > 0 && args[0] == "--" {
 			args = args[1:]
 		}

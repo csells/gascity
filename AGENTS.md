@@ -81,6 +81,9 @@ The owned Codex launch must also finalize existing GC hook files after session
 staging and before either native child starts. Transient hook rewrites are
 observable consent changes; a later reconciler tick cannot repair an already
 blocked native resume. Preserve custom hooks and native trust decisions.
+For remote Codex resumes, transfer explicit approval/sandbox flags through the
+native resume API and verify its effective response before binding the session.
+Never silently drop unsupported permission overrides or accept a mismatch.
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
 has `*_test.go` files next to the code. Integration tests that need real

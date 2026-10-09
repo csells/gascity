@@ -40,7 +40,7 @@ func TestBridgeRetainsProtocolFieldsWhileMultiplexing(t *testing.T) {
 			t.Errorf("fixture close: %v", err)
 		}
 	}()
-	b := &bridge{input: bridgeOut, routes: map[string]route{}, done: make(chan struct{})}
+	b := &bridge{input: bridgeOut, routes: map[string]route{}, done: make(chan struct{}), resumePermissions: resumePermissions{approval: "never", sandbox: "danger-full-access"}}
 	b.controller = New(b)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up := websocket.Upgrader{}
@@ -207,5 +207,42 @@ func TestBridgeRetainsProtocolFieldsWhileMultiplexing(t *testing.T) {
 	}
 	if err = <-sent; err != nil {
 		t.Fatal(err)
+	}
+	// The remote TUI omits permissions; GC transfers the explicit launch choice
+	// into the native resume and rejects a server that does not confirm it.
+	for _, confirmed := range []bool{true, false} {
+		go func() {
+			sent <- c.WriteMessage(websocket.TextMessage, []byte(`{"id":10,"method":"thread/resume","params":{"threadId":"native-exact","model":"gpt-6-luna"}}`))
+		}()
+		if !scan.Scan() {
+			t.Fatal("missing native resume")
+		}
+		if err = json.Unmarshal(scan.Bytes(), &request); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(request["params"]), `"approvalPolicy":"never"`) || !strings.Contains(string(request["params"]), `"sandbox":"danger-full-access"`) {
+			t.Fatalf("permissions not forwarded: %s", request["params"])
+		}
+		if err = <-sent; err != nil {
+			t.Fatal(err)
+		}
+		policy := "dangerFullAccess"
+		if !confirmed {
+			policy = "readOnly"
+		}
+		go func() {
+			_, e := nativeOut.Write([]byte(`{"id":` + string(request["id"]) + `,"result":{"thread":{"id":"native-exact"},"approvalPolicy":"never","sandbox":{"type":"` + policy + `"}}}` + "\n"))
+			sent <- e
+		}()
+		err = c.ReadJSON(&reply)
+		if confirmed && err != nil {
+			t.Fatal(err)
+		}
+		if !confirmed && err == nil {
+			t.Fatal("accepted native permission mismatch")
+		}
+		if err = <-sent; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

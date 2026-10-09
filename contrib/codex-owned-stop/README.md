@@ -57,3 +57,16 @@ an idle transcript do not establish these runtime guarantees.
 Qualification is in progress. No stock installation is replaced by this recipe,
 and this experimental source is not an approved stable release. Use a disposable
 VM and record the exact CLI/helper/supervisor hashes with the live evidence.
+
+### Resuming with explicit permissions
+
+The adapter moves `--ask-for-approval`/`-a`, `--sandbox`/`-s`, and
+`--dangerously-bypass-approvals-and-sandbox`/`--yolo` from the remote TUI
+arguments into native `thread/resume` parameters. It checks the returned
+approval policy and sandbox before accepting the session. Model, effort,
+conversation identity, and unrelated native fields retain their normal routing.
+
+Remote resume with named profiles, extra writable roots, automatic review, or
+permission-related `-c` overrides is not supported by this adapter and fails
+explicitly. Use the supported permission flags; absent overrides preserve the
+native conversation's saved permissions. No trust settings are changed.

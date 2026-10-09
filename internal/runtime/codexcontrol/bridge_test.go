@@ -158,3 +158,85 @@ func TestInitialTargetCannotGuessAnExistingNativeTurn(t *testing.T) {
 		t.Fatalf("unknown identity guessed an existing turn: %d %s", r.Code, r.Body.String())
 	}
 }
+
+func TestResumePermissionsTravelThroughNativeAPI(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		args              []string
+		approval, sandbox string
+	}{
+		{"unrestricted", []string{"resume", "--dangerously-bypass-approvals-and-sandbox", "thread", "--model", "gpt-6-luna"}, "never", "danger-full-access"},
+		{"restricted", []string{"resume", "-a", "untrusted", "--sandbox=read-only", "thread"}, "untrusted", "read-only"},
+		{"workspace", []string{"-s", "workspace-write", "resume", "thread", "-a", "on-request"}, "on-request", "workspace-write"},
+		{"native bypass precedence", []string{"resume", "--yolo", "-a=untrusted", "-s", "read-only", "thread"}, "never", "danger-full-access"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args, permissions, err := prepareResumePermissions(tt.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if permissions.approval != tt.approval || permissions.sandbox != tt.sandbox {
+				t.Fatalf("lost requested permissions: %+v", permissions)
+			}
+			for _, arg := range args {
+				if strings.Contains(arg, "sandbox") || strings.Contains(arg, "approval") || arg == "--full-auto" {
+					t.Fatalf("remote TUI still receives permission flag: %v", args)
+				}
+			}
+			raw, err := permissions.apply(json.RawMessage(`{"threadId":"thread","model":"gpt-6-luna","config":{"model_reasoning_effort":"medium"},"extension":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				ThreadID  string            `json:"threadId"`
+				Approval  string            `json:"approvalPolicy"`
+				Sandbox   string            `json:"sandbox"`
+				Extension bool              `json:"extension"`
+				Config    map[string]string `json:"config"`
+			}
+			if err = json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ThreadID != "thread" || got.Approval != tt.approval || got.Sandbox != tt.sandbox || !got.Extension || got.Config["model_reasoning_effort"] != "medium" {
+				t.Fatalf("resume changed semantics: %s", raw)
+			}
+			wireSandbox := map[string]string{"danger-full-access": "dangerFullAccess", "read-only": "readOnly", "workspace-write": "workspaceWrite"}[tt.sandbox]
+			result := json.RawMessage(`{"approvalPolicy":"` + tt.approval + `","sandbox":{"type":"` + wireSandbox + `"}}`)
+			if err = permissions.verify(result); err != nil {
+				t.Fatal(err)
+			}
+			if err = permissions.verify(json.RawMessage(`{"approvalPolicy":"on-request","sandbox":{"type":"unknown"}}`)); err == nil {
+				t.Fatal("accepted different native permissions")
+			}
+			if err = permissions.verify(json.RawMessage(`{}`)); err == nil {
+				t.Fatal("accepted unverified permissions")
+			}
+		})
+	}
+}
+
+func TestResumePermissionsPreserveUnrelatedArgumentsAndRejectAmbiguity(t *testing.T) {
+	for _, args := range [][]string{
+		{"--model", "resume", "--dangerously-bypass-approvals-and-sandbox"},
+		{"--", "resume"},
+		{"resume", "thread", "--", "--sandbox=read-only"},
+	} {
+		got, permissions, err := prepareResumePermissions(args)
+		if err != nil || strings.Join(got, "\x00") != strings.Join(args, "\x00") || permissions != (resumePermissions{}) {
+			t.Fatalf("changed non-permission arguments: %v %+v %v", got, permissions, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"resume", "thread", "--sandbox"},
+		{"resume", "thread", "--sandbox=typo"},
+		{"resume", "thread", "--ask-for-approval=typo"},
+		{"resume", "thread", "--full-auto", "--yolo"},
+		{"resume", "thread", "-c", "approval_policy=\"never\""},
+		{"resume", "thread", "--add-dir", "/tmp"},
+		{"resume", "thread", "--profile", "custom"},
+	} {
+		if _, _, err := prepareResumePermissions(args); err == nil {
+			t.Fatalf("silently accepted unsupported/ambiguous permissions: %v", args)
+		}
+	}
+}
