@@ -2273,8 +2273,8 @@ func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
 // never silent. If a prior source exists but cannot be read, the mutation aborts
 // before any write, since rollback would have no basis to restore it.
 func (cs *controllerState) UpsertFormula(name string, content []byte) error {
-	// The read-prior -> write -> refresh -> rollback sequence is not atomic across
-	// concurrent editor ops (the pre-existing mutateAndPoke rollback race class):
+	// The formula source backup and rollback sit outside mutateAndPoke's
+	// city-config publication transaction. Across concurrent formula edits,
 	// a same-name racing upsert could see this rollback's delete-on-no-prior erase
 	// its committed file. Very low risk on a single-operator control plane; a
 	// coarse per-city mutation lock is deferred as out of scope for this change.
@@ -3312,6 +3312,13 @@ func (s *configMutationSnapshot) restore() error {
 }
 
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	// Keep unvalidated writes and rollback inside the publication transaction.
+	// A reload must not cache a rejected raw patch while publishing an older
+	// accepted composed config. This also serializes config snapshots across
+	// concurrent API edits, so rollback cannot overwrite another edit.
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
+
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -3323,12 +3330,10 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if err := mutate(); err != nil {
 		return err
 	}
-	cs.publishMu.Lock()
 	revision, err := cs.refreshConfigSnapshot()
 	if err == nil {
 		cs.markConfigMutationPending(revision)
 	}
-	cs.publishMu.Unlock()
 	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {

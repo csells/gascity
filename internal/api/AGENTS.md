@@ -41,6 +41,13 @@ Violating any fails the build; full rationale is in the architecture docs.
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
 
+## Configuration publication
+
+API config edits, validation, snapshot publication and city-config rollback
+share the controller's publication transaction with runtime reloads. A rejected
+edit must remain absent from both disk and the API's cached raw config. Preserve
+that boundary when changing `mutateAndPoke` or runtime config publication.
+
 ## Worker boundary exception
 
 `session_manager.go` constructs `session.Manager` values for API handlers —
