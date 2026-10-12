@@ -548,7 +548,15 @@ func TestCodexPermissionModesUseApprovalPoliciesStockCodexAccepts(t *testing.T) 
 			continue
 		}
 		for _, c := range option.Choices {
+			// FlagAliases are only matched against input args and never
+			// emitted, so the retired untrusted alias is left unchecked.
 			checkArgs("permission_mode choice "+c.Value, c.FlagArgs)
+			// PermissionModes is what clients and gc config explain show for
+			// a mode, and FlagArgs is what a launch emits, so they must
+			// spell the same flags.
+			if flags, ok := codex.PermissionModes[c.Value]; ok && flags != strings.Join(c.FlagArgs, " ") {
+				t.Errorf("PermissionModes[%s] = %q, want choice FlagArgs %q", c.Value, flags, strings.Join(c.FlagArgs, " "))
+			}
 		}
 	}
 
