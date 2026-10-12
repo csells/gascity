@@ -330,6 +330,104 @@ func AcceptStartupDialogsWithTimeout(
 	sendKeys func(keys ...string) error,
 	opts ...StartupDialogOption,
 ) error {
+	for round := 0; ; round++ {
+		if err := acceptStartupDialogsOnce(ctx, timeout, peek, sendKeys, opts...); err != nil {
+			return err
+		}
+		if round == maxCodexStartupDialogRounds {
+			return nil
+		}
+		late, err := watchCodexStartup(ctx, timeout, peek)
+		if err != nil || !late {
+			return err
+		}
+	}
+}
+
+// maxCodexStartupDialogRounds bounds how many times a Codex pane that keeps
+// drawing new startup dialogs is answered before startup handling gives up.
+const maxCodexStartupDialogRounds = 3
+
+// watchCodexStartup waits for a Codex pane to finish starting and reports
+// whether a startup dialog appeared instead. Codex 0.156+ draws its composer
+// before configuring the session, then can replace it with "Trust this folder?"
+// or "Hooks need review" seconds later (1.6-3.0s measured on 0.162.1). The
+// composer's "› " is the same signal the ordered handlers read as "no dialog is
+// coming", so without this watch a late dialog parks the session (#6464).
+// Startup is finished once Codex draws its status line under the composer.
+// Only a starting Codex composer is watched, and only a dialog that newly
+// replaces it triggers another pass; the watch is bounded by timeout.
+func watchCodexStartup(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+) (bool, error) {
+	content, err := peek(startupDialogPeekLines)
+	if err != nil {
+		return false, err
+	}
+	// Watch only a Codex composer that is still starting. Whatever else the
+	// ordered pass left on screen, including a dialog it already answered, is
+	// not re-answered here.
+	if !containsCodexBanner(content) || containsStartupDialog(content) || codexStartupSettled(content) {
+		return false, nil
+	}
+	deadline := dialogClock.Now().Add(timeout)
+	for dialogClock.Now().Before(deadline) {
+		sleep(ctx, dialogPollInterval)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		content, err = peek(startupDialogPeekLines)
+		if err != nil {
+			return false, err
+		}
+		// A late dialog may replace the whole screen, banner included.
+		if containsStartupDialog(content) {
+			return true, nil
+		}
+		if !containsCodexBanner(content) || codexStartupSettled(content) {
+			return false, nil
+		}
+	}
+	return false, nil
+}
+
+func containsStartupDialog(content string) bool {
+	return containsThemeSelectionDialog(content) || containsPostThemeStartupDialog(content)
+}
+
+func containsCodexBanner(content string) bool {
+	return strings.Contains(content, "OpenAI Codex")
+}
+
+// codexStartupSettled reports whether Codex has drawn its status line
+// ("<model> · <dir>") under the composer, which it does only after startup,
+// including any trust or hook-review dialog, has finished.
+func codexStartupSettled(content string) bool {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !containsPromptIndicator(lines[i]) {
+			continue
+		}
+		for _, below := range lines[i+1:] {
+			if strings.Contains(below, " · ") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// acceptStartupDialogsOnce answers each known startup dialog in order.
+func acceptStartupDialogsOnce(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+	opts ...StartupDialogOption,
+) error {
 	cfg := newStartupDialogConfig(opts)
 	budget := newStartupDialogBudget(timeout)
 	if err := acceptThemeSelectionDialog(ctx, budget, peek, sendKeys); err != nil {
