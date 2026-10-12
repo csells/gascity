@@ -1,6 +1,9 @@
 package sessionlog
 
-import "slices"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // dagNode is a node in the conversation DAG.
 type dagNode struct {
@@ -161,26 +164,45 @@ func BuildDag(entries []*Entry) *DagResult {
 	}
 
 	// Claude can attach each parallel result directly to its own tool call,
-	// making the earlier result a sibling of the later call's branch. Retain
-	// pure results tied to a selected invocation without importing other branch
-	// text. Merge at their recorded position while preserving branch order.
-	for _, entry := range entries {
-		if activeBranchUUIDs[entry.UUID] || !activeBranchUUIDs[entry.ParentUUID] {
-			continue
+	// making the earlier result a sibling of the later call's branch. Claude
+	// Code also splits one API response into rows chained by parentUuid that
+	// share message.id, so a later parallel call of that response can sit on
+	// the sibling branch too (observed on 2.1.296). Retain, to a fixed point,
+	// rows of a response already selected and pure results tied to a selected
+	// invocation, without importing other branch text. Merge at their recorded
+	// position while preserving branch order.
+	selectedResponses := make(map[string]bool)
+	for _, entry := range activeBranch {
+		if id := assistantResponseID(entry); id != "" {
+			selectedResponses[id] = true
 		}
-		parent, node := nodeMap[entry.ParentUUID], nodeMap[entry.UUID]
-		if parent == nil || node == nil || node.entry != entry || node.lineIndex <= parent.lineIndex || !attachedToolResult(entry, parent.entry) {
-			continue
-		}
-		insertion := len(activeBranch)
-		for i, current := range activeBranch {
-			if nodeMap[current.UUID].lineIndex > node.lineIndex {
-				insertion = i
-				break
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, entry := range entries {
+			if activeBranchUUIDs[entry.UUID] || !activeBranchUUIDs[entry.ParentUUID] {
+				continue
 			}
+			parent, node := nodeMap[entry.ParentUUID], nodeMap[entry.UUID]
+			if parent == nil || node == nil || node.entry != entry || node.lineIndex <= parent.lineIndex {
+				continue
+			}
+			response := assistantResponseID(entry)
+			sameResponse := response != "" && selectedResponses[response] && assistantResponseID(parent.entry) == response
+			if !sameResponse && !attachedToolResult(entry, parent.entry) {
+				continue
+			}
+			insertion := len(activeBranch)
+			for i, current := range activeBranch {
+				if nodeMap[current.UUID].lineIndex > node.lineIndex {
+					insertion = i
+					break
+				}
+			}
+			activeBranch = slices.Insert(activeBranch, insertion, entry)
+			activeBranchUUIDs[entry.UUID] = true
+			changed = true
 		}
-		activeBranch = slices.Insert(activeBranch, insertion, entry)
-		activeBranchUUIDs[entry.UUID] = true
 	}
 	// Preserve cross-branch completion detection for runtimes such as Pi.
 	allToolResultIDs := collectAllToolResultIDs(entries)
@@ -194,6 +216,21 @@ func BuildDag(entries []*Entry) *DagResult {
 		HasBranches:        len(tips) > 1,
 		CompactionCount:    compactionCount,
 	}
+}
+
+// assistantResponseID returns the API response identity (message.id) of an
+// assistant row, or "" for other rows.
+func assistantResponseID(entry *Entry) string {
+	if entry.Type != "assistant" || len(entry.Message) == 0 {
+		return ""
+	}
+	var message struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(entry.Message, &message) != nil {
+		return ""
+	}
+	return message.ID
 }
 
 // attachedToolResult accepts only result records whose tool IDs belong to
