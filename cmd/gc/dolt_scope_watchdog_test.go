@@ -412,8 +412,24 @@ func TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity(t *testing.T) {
 // torn-down address space, yielding a non-empty but truncated environment.
 // A read is accepted only when the process image (/proc/<pid>/exe) is the
 // same before and after it and the data ends on an entry terminator.
+//
+// A child this test process started may not have reached its first execve
+// yet. Until it does, its image is still this test binary and its environ is
+// byte for byte this process's own startup environ, not the one exec handed
+// it (Go's os.Setenv, and so t.Setenv, never rewrites that block). Such a
+// read is complete and stable but belongs to the wrong image, so it is
+// skipped too. A child that exec'd this same binary (the scope watchdog) is
+// told apart by the environment it was given.
 func waitForProcEnviron(t *testing.T, pid int) map[string]string {
 	t.Helper()
+	self, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		t.Fatalf("read own exe: %v", err)
+	}
+	selfEnviron, err := os.ReadFile("/proc/self/environ")
+	if err != nil {
+		t.Fatalf("read own environ: %v", err)
+	}
 	procDir := filepath.Join("/proc", strconv.Itoa(pid))
 	deadline := time.After(5 * time.Second)
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -431,7 +447,8 @@ func waitForProcEnviron(t *testing.T, pid int) map[string]string {
 		if err != nil {
 			t.Fatalf("read exe for pid %d: %v", pid, err)
 		}
-		if exeBefore == exeAfter && len(data) > 0 && data[len(data)-1] == 0 {
+		preExec := exeBefore == self && string(data) == string(selfEnviron)
+		if exeBefore == exeAfter && !preExec && len(data) > 0 && data[len(data)-1] == 0 {
 			env := make(map[string]string)
 			for _, entry := range strings.Split(string(data), "\x00") {
 				if key, value, ok := strings.Cut(entry, "="); ok && key != "" {
@@ -442,7 +459,7 @@ func waitForProcEnviron(t *testing.T, pid int) map[string]string {
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("pid %d environ never settled within 5s (empty, or read across an exec)", pid)
+			t.Fatalf("pid %d environ never settled within 5s (empty, read across an exec, or not yet exec'd)", pid)
 		case <-tick.C:
 		}
 	}
