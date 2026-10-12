@@ -1665,7 +1665,7 @@ func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
 		// Known live states — proceed.
 	default:
 		if !m.sp.IsRunning(sessName) {
-			return fmt.Errorf("session %s is not active", id)
+			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}
 	release, err := m.leaseForStop(ctx, by, id, sessName, operatorLeaseWait)
