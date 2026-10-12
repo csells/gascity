@@ -28,7 +28,7 @@ type MailListBody struct {
 
 // MailListOutput is the response envelope for mail list and thread endpoints.
 type MailListOutput struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
 	Body      MailListBody
 }

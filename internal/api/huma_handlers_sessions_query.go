@@ -21,6 +21,7 @@ import (
 // logic from mutations and streaming.
 
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -86,7 +87,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
 	return &ListOutput[sessionResponse]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),
 		Body: ListBody[sessionResponse]{
 			Items:         page,
@@ -118,6 +119,7 @@ func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) 
 // humaHandleSessionGet is the Huma-typed handler for GET /v0/session/{id}.
 
 func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -138,7 +140,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
 	return &IndexOutput[sessionResponse]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),
 		Body:      resp,
 	}, nil
@@ -149,6 +151,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 // humaHandleSessionCreate is the Huma-typed handler for POST /v0/sessions.
 
 func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -221,7 +224,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 				Pagination:         history.Pagination,
 			}, input.IncludeThinking)
 			return &IndexOutput[sessionTranscriptGetResponse]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body:  structuredTranscriptResponseFromEvent(projection),
 			}, nil
 		}
@@ -240,7 +243,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 				return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 			}
 			return &IndexOutput[sessionTranscriptGetResponse]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body: sessionTranscriptGetResponse{
 					ID:         info.ID,
 					Template:   info.Template,
@@ -274,7 +277,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 			turns = append(turns, turn)
 		}
 		return &IndexOutput[sessionTranscriptGetResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body: sessionTranscriptGetResponse{
 				ID:         info.ID,
 				Template:   info.Template,
@@ -292,7 +295,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 
 	if wantRaw {
 		return &IndexOutput[sessionTranscriptGetResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body: sessionTranscriptGetResponse{
 				ID:       info.ID,
 				Template: info.Template,
@@ -313,7 +316,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
 		return &IndexOutput[sessionTranscriptGetResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body: sessionTranscriptGetResponse{
 				ID:       info.ID,
 				Template: info.Template,
@@ -325,7 +328,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 	}
 
 	return &IndexOutput[sessionTranscriptGetResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body: sessionTranscriptGetResponse{
 			ID:       info.ID,
 			Template: info.Template,
@@ -337,6 +340,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 }
 
 func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
+	index := s.latestIndex()
 	activity := string(worker.TailActivityIdle)
 	output := ""
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
@@ -357,7 +361,7 @@ func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}, includeThinking)
 	return &IndexOutput[sessionTranscriptGetResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  structuredTranscriptResponseFromEvent(projection),
 	}, nil
 }
@@ -367,6 +371,7 @@ func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking
 // humaHandleSessionPending is the Huma-typed handler for GET /v0/session/{id}/pending.
 
 func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionPendingResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -379,7 +384,7 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 
 	if b, bErr := store.Get(id); bErr == nil && b.Metadata["state"] == "creating" {
 		return &IndexOutput[sessionPendingResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body:  sessionPendingResponse{Supported: false},
 		}, nil
 	}
@@ -390,7 +395,7 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 		return nil, humaSessionManagerError(err)
 	}
 	return &IndexOutput[sessionPendingResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body: sessionPendingResponse{
 			Supported: supported,
 			Pending:   pending,
@@ -496,6 +501,7 @@ var errNoSessionsStore = errors.New("no bead store configured")
 // aggregate, so one gone runtime session does not blind the operator to the
 // rest.
 func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -523,7 +529,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	}
 
 	return &ListOutput[cityPendingEntry]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),
 		Body: ListBody[cityPendingEntry]{
 			Items:         entries,
@@ -539,6 +545,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 // humaHandleSessionPatch is the Huma-typed handler for PATCH /v0/session/{id}.
 
 func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionAgentListResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -556,7 +563,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 	}
 	if logPath == "" {
 		return &IndexOutput[sessionAgentListResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body:  sessionAgentListResponse{Agents: []sessionlog.AgentMapping{}},
 		}, nil
 	}
@@ -570,7 +577,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 		mappings = []sessionlog.AgentMapping{}
 	}
 	return &IndexOutput[sessionAgentListResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  sessionAgentListResponse{Agents: mappings},
 	}, nil
 }
@@ -580,6 +587,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 // humaHandleSessionAgentGet is the Huma-typed handler for GET /v0/session/{id}/agents/{agentId}.
 
 func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgentGetInput) (*IndexOutput[sessionAgentGetResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -615,7 +623,7 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 	}
 
 	return &IndexOutput[sessionAgentGetResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body: sessionAgentGetResponse{
 			Messages: agentSession.RawPayloads(),
 			Status:   agentSession.Status,

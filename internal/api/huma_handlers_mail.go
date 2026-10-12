@@ -196,6 +196,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
@@ -217,7 +218,6 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
-	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
 
 	switch status {
@@ -336,6 +336,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 
 // humaHandleMailGet is the Huma-typed handler for GET /v0/mail/{id}.
 func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
 		return nil, err
@@ -367,7 +368,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 	}
 	result.Message.Rig = result.Rig
 	return &IndexOutput[mail.Message]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(cityStore),
 		Body:      result.Message,
 	}, nil
@@ -377,6 +378,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 // Body validation (To and Subject required, minLength:"1") is enforced by
 // the framework from MailSendInput's struct tags.
 func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errMailNoBeadStore) {
@@ -409,7 +411,7 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	}
 
 	return &IndexOutput[mail.Message]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  msg,
 	}, nil
 }
@@ -478,9 +480,9 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 
 // humaHandleMailThread is the Huma-typed handler for GET /v0/mail/thread/{id}.
 func (s *Server) humaHandleMailThread(ctx context.Context, input *MailThreadInput) (*MailListOutput, error) {
+	index := s.latestIndex()
 	threadID := input.ID
 	rig := input.Rig
-	index := s.latestIndex()
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
@@ -640,6 +642,7 @@ func (s *Server) humaHandleMailArchive(ctx context.Context, input *MailArchiveIn
 
 // humaHandleMailReply is the Huma-typed handler for POST /v0/mail/{id}/reply.
 func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	id := input.ID
 	rig := input.Rig
 
@@ -674,7 +677,7 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	}
 
 	return &IndexOutput[mail.Message]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  msg,
 	}, nil
 }

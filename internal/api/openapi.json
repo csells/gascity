@@ -28229,7 +28229,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -29150,7 +29150,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -29969,7 +29969,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -30439,7 +30439,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -30787,7 +30787,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31111,7 +31111,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31665,7 +31665,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31821,7 +31821,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31988,7 +31988,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32105,7 +32105,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32217,7 +32217,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32314,7 +32314,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32411,7 +32411,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32746,7 +32746,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33026,7 +33026,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33504,7 +33504,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33659,7 +33659,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33891,7 +33891,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -34597,7 +34597,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -35067,7 +35067,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -36188,7 +36188,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -38318,7 +38318,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -38473,7 +38473,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -38774,7 +38774,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -39047,7 +39047,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -39638,7 +39638,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -41849,7 +41849,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42137,7 +42137,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42234,7 +42234,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42663,7 +42663,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42760,7 +42760,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43189,7 +43189,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43286,7 +43286,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43544,7 +43544,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43959,7 +43959,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -44242,7 +44242,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -44517,7 +44517,7 @@
             "headers": {
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -44912,7 +44912,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -45373,7 +45373,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46135,7 +46135,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46365,7 +46365,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46505,7 +46505,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46661,7 +46661,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46843,7 +46843,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46990,7 +46990,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -47660,7 +47660,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -47818,7 +47818,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -48230,7 +48230,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -49646,7 +49646,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -50201,7 +50201,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -50689,7 +50689,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -51413,7 +51413,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"

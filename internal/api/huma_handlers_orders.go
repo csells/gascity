@@ -676,13 +676,13 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	Body ordersFeedBody
 }, error,
 ) {
+	index := s.latestIndex()
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
 	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
 	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {

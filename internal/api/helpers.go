@@ -14,7 +14,11 @@ type listResponse struct {
 
 // latestIndex returns the latest event sequence, or 0 if unavailable.
 // Used by every Huma handler that emits an IndexOutput / ListOutput to
-// populate the X-GC-Index response header.
+// populate the X-GC-Index response header. Capture it before reading the
+// state the response reports (after any blocking wait): a client resumes
+// events or blocks after X-GC-Index, so an index read after the snapshot can
+// cover a concurrent change the body lacks, and that change is never seen.
+// Capturing first can only replay an event the body already reflects.
 func (s *Server) latestIndex() uint64 {
 	ep := s.state.EventProvider()
 	if ep == nil {

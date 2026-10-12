@@ -43,7 +43,7 @@ type ProviderPublicListBody struct {
 // ProviderPublicListOutput is the response envelope for GET
 // /v0/city/{cityName}/providers/public.
 type ProviderPublicListOutput struct {
-	Index uint64 `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Index uint64 `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change the body does not reflect."`
 	Body  ProviderPublicListBody
 }
 

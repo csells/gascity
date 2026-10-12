@@ -23,6 +23,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -35,7 +36,6 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// back to the patch-presence heuristic.
 	rawCfg := s.rawConfig()
 
-	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
 		// Cache key derived from input struct tags — adding a new query
@@ -273,6 +273,7 @@ func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQual
 // and unqualified routes normalize to a single "name" string before
 // dispatching here.
 func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
+	index := s.latestIndex()
 	if name == "" {
 		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
@@ -370,7 +371,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	}
 
 	return &IndexOutput[agentResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }

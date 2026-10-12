@@ -84,6 +84,10 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", rec.Code)
 	}
+	builtIndex := rec.Header().Get("X-GC-Index")
+	if builtIndex == "" {
+		t.Fatal("first status missing X-GC-Index")
+	}
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -108,10 +112,12 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 		t.Fatalf("List calls after %d index changes = %d, want 1 (time-bucketed cache must survive sequence churn)", 5, store.listCalls)
 	}
 
-	// The X-GC-Index header still reflects the live sequence even on a cache
-	// hit, so blocking/long-poll consumers see fresh index values.
-	if got := rec.Header().Get("X-GC-Index"); got == "" || got == "0" {
-		t.Fatalf("X-GC-Index = %q, want live sequence on cache hit", got)
+	// A cache hit reports the index its body was built at, not the live
+	// sequence. The body predates the recorded events, so a long-poll or
+	// stream resume after the live head would skip them; after the build
+	// index it returns at once with a fresh body.
+	if got := rec.Header().Get("X-GC-Index"); got != builtIndex {
+		t.Fatalf("X-GC-Index = %q, want build index %q on cache hit", got, builtIndex)
 	}
 }
 

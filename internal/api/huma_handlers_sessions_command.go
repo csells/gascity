@@ -526,6 +526,7 @@ func (sessionTranscriptGetResponse) Schema(r huma.Registry) *huma.Schema {
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.
 
 func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchInput) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -606,7 +607,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	}
 	presp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  presp,
 	}, nil
 }
@@ -618,6 +619,7 @@ func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *Sessi
 }
 
 func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -691,7 +693,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	resp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -1298,6 +1300,7 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 }
 
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -1337,7 +1340,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 	}
 	rresp := sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  rresp,
 	}, nil
 }
