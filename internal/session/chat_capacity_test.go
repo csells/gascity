@@ -34,7 +34,7 @@ func seedResumableACPSession(t *testing.T, startErr func(sessName string) error)
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := &routeRecordingFake{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	b, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -119,7 +119,7 @@ func assertCapacityRefusalKeptConversation(t *testing.T, err error, sp *routeRec
 func TestEnsureRunningRuntimeOnly_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *testing.T) {
 	mgr, sp, store, id, sessName := seedResumableACPSession(t, capacityRefusal)
 
-	err := mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	assertCapacityRefusalKeptConversation(t, err, sp, store, id, sessName)
 }
@@ -128,7 +128,7 @@ func TestEnsureRunningRuntimeOnly_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *t
 func TestEnsureRunning_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *testing.T) {
 	mgr, sp, store, id, sessName := seedResumableACPSession(t, capacityRefusal)
 
-	err := mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	assertCapacityRefusalKeptConversation(t, err, sp, store, id, sessName)
 }
@@ -140,7 +140,7 @@ func TestEnsureRunningRuntimeOnly_PlainStartupDeathStillRetriesFresh(t *testing.
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, sessName)
 	})
 
-	err := mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded, want the scripted startup death")
@@ -170,9 +170,9 @@ func TestCommittedConversationStartupFailurePreservesIdentity(t *testing.T) {
 			}
 			var err error
 			if runtimeOnly {
-				err = mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+				err = mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 			} else {
-				err = mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+				err = mgr.Start(context.Background(), testActor(mgr, ActorOperator), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 			}
 			if err == nil {
 				t.Fatal("failed resume reported success")
@@ -202,12 +202,12 @@ func TestCommittedConversationImmediateExitPreservesIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			fake := &failOnceStartProvider{Fake: sp.Fake, armed: true}
-			mgr := NewManagerWithOptions(store, fake, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+			mgr := newTestManager(t, store, fake, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 			var err error
 			if runtimeOnly {
-				err = mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+				err = mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 			} else {
-				err = mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+				err = mgr.Start(context.Background(), testActor(mgr, ActorOperator), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 			}
 			if err == nil {
 				t.Fatal("immediate exit reported success")

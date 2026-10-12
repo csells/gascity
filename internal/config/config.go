@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -1930,6 +1931,10 @@ type MailConfig struct {
 	// purge. The sweep distinguishes the two: empty leaves it at its own
 	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
+	// UnreadRetentionTTL is how long a never-read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables the unread-mail
+	// phase; it is opt-in so unread mail is never closed by default.
+	UnreadRetentionTTL string `toml:"unread_retention_ttl,omitempty"`
 }
 
 // RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or
@@ -1945,6 +1950,23 @@ func (m MailConfig) RetentionTTLDuration() (time.Duration, error) {
 	}
 	if d < 0 {
 		return 0, fmt.Errorf("[mail] retention_ttl must not be negative: got %q", raw)
+	}
+	return d, nil
+}
+
+// UnreadRetentionTTLDuration parses UnreadRetentionTTL as a Go
+// time.Duration. Empty or zero disables the unread-mail sweep phase.
+func (m MailConfig) UnreadRetentionTTLDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(m.UnreadRetentionTTL)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[mail] unread_retention_ttl %q is not a valid Go duration: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("[mail] unread_retention_ttl must not be negative: got %q", raw)
 	}
 	return d, nil
 }
@@ -2897,9 +2919,12 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 30s if empty or unparseable.
+// Defaults to 30s if empty or unparseable. A test-hooks gc run with
+// clock.BackstopSpeedupEnv set returns it already divided, so every duration
+// a caller derives from it is divided too. That constant's doc lists those
+// callers; a new caller is added to it.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	return durationOr(d.PatrolInterval, 30*time.Second)
+	return clock.Backstop(durationOr(d.PatrolInterval, 30*time.Second))
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
@@ -3409,7 +3434,11 @@ type Agent struct {
 	// set -x or echoing secrets in setup commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the directory of the file that declares
+	// the agent: the city directory for city.toml, the fragment's directory
+	// for an included fragment, and the pack directory for an agent a pack
+	// declares — in pack.toml or in agents/<name>/agent.toml alike. Paths
+	// prefixed with "//" resolve against the city root.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
 	// Nudge is text typed into the agent's session after startup.
 	// Used for CLI agents that don't accept command-line prompts. For a known
