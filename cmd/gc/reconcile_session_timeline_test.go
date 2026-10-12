@@ -197,7 +197,7 @@ func (w *legacyWorld) twin(t *testing.T) twin {
 	for _, rig := range slices.Sorted(maps.Keys(w.rigs)) {
 		stores = append(stores, w.rigs[rig])
 	}
-	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
+	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c; w.trackers(c) }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
 }
 
 // twin is copy B's view; it writes the backings, and a reload publishes a
@@ -580,6 +580,8 @@ var (
 var timelineGoldenRulings = []goldenRuling{
 	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
 	{"a live drift on a seat", timelineGoldenBaseline, "e4f04b540c00"},
+	{"an idle named session past its idle_timeout is stopped", timelineGoldenBaseline, "67930e13ed18"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineGoldenBaseline, "adade3317639"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
@@ -588,6 +590,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
+	{"a manual create read between its two writes", timelineGoldenBaseline, "8c2d0f4552c4"},
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
 	{"a quarantine, then a kill fence, expires", timelineGoldenBaseline, "e6f3872c765e"},
 	{"a reload turns idle sleep on for a detached row", timelineGoldenBaseline, "787037012e13"},
@@ -791,7 +794,29 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline())
+	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline(), idleTimeoutTimeline())
+}
+
+// manualCreateTimeline is staging J45 through time (v5.9r; SESS-065): a
+// manual create the passes read between its two writes, the row (with the
+// keys Manager.CreateSession writes first) and then its session_name.
+// Undesired for want of a name, it is kept, not rolled back, and once its
+// name lands both copies wake it.
+func manualCreateTimeline() []timelineFixture {
+	one := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents[0].MaxActiveSessions, cfg.Agents[0].MinActiveSessions = intPtr(1), intPtr(0)
+		return cfg
+	}
+	row := sessionRow("gc-1", "template", "worker", "agent_name", "worker", "alias", "worker", "state", "start-pending",
+		"session_origin", "manual", "command", "true", "generation", "1", "continuation_epoch", "1", "instance_token", "tok-gc-1",
+		"pending_create_claim", "true", "pending_create_started_at", tlAt(0))
+	f := tlFixture("a manual create read between its two writes", one,
+		[]parityRow{row}, nil, nil,
+		[]parityStep{{Name: "its session_name lands", Advance: 2 * time.Second, Op: func(tw twin) { tw.set("gc-1", "session_name", "s-gc-1") }}},
+		nil, map[string]map[string]string{"its session_name lands": tlMerged(tlPol("gc-1"), tlRestarted())})
+	f.Setup = func(tw twin) { tw.set("gc-1", "work_dir", tw.city) }
+	return []timelineFixture{f}
 }
 
 func tlAt(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
@@ -1336,9 +1361,9 @@ func operatorTimeline() []timelineFixture {
 	}
 	// nudgeQueued is the wait's nudge v2's waits step queues for the
 	// waiter, gc-3, where legacy delivers it with the restart.
-	nudgeQueued := map[string]string{"work:gc-2:nudge_id": "wait-nudge-bead", "work:gc-3": "wait-nudge-bead"}
+	nudgeQueued := map[string]string{"work:gc-2:nudge_id": "§12.2#58 wait-nudge-bead", "work:gc-3": "§12.2#58 wait-nudge-bead"}
 	for _, k := range []string{"agent", "deliver_after", "expires_at", "labels", "message", "nudge_id", "reference_json", "session_id", "source", "state", "status", "title", "type"} {
-		nudgeQueued["work:gc-3:"+k] = "wait-nudge-bead"
+		nudgeQueued["work:gc-3:"+k] = "§12.2#58 wait-nudge-bead"
 	}
 	waiter := tlFixture("a waiter sleeps", napping, []parityRow{tlRow("gc-1", 1, time.Hour)},
 		append(tlClaim("in_progress", "s-gc-1"), parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}}), []simRuntime{tlLive("gc-1")},
@@ -1377,4 +1402,49 @@ func operatorTimeline() []timelineFixture {
 			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}
+}
+
+// idleTimeoutTimeline is A15's idle timeout (C7a-1): a live named
+// on-demand session idle past its idle_timeout by the activity clock is
+// stopped through the stop verb with the idle finalize; one holding
+// assigned work defers until its streak is exhausted.
+func idleTimeoutTimeline() []timelineFixture {
+	chatIdling := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true", IdleTimeout: "5m"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
+	chatName := agent.SessionNameFor("test-city", "chat", tlCity().Workspace.SessionTemplate)
+	named := chatRow("gc-c", "1", "state", "awake", "session_name", chatName, "instance_token", "tok-gc-c", "last_woke_at", tlAt(-time.Minute), "alias", "chat", "configured_named_mode", "on_demand")
+	named.Title = "Display gc-c"
+	active := func(tw twin) { tw.sp.SetActivity(chatName, tw.now) }
+	stopped := tlFixture("an idle named session past its idle_timeout is stopped", chatIdling,
+		[]parityRow{named}, nil, []simRuntime{tlLive("gc-c")},
+		[]parityStep{
+			{Name: "active", Op: active},
+			{Name: "idle past idle_timeout", Advance: 6 * time.Minute},
+		}, tlPol("gc-c"), nil)
+	stopped.Behaviors = []string{"GUAR-036", "SESS-574", "SESS-576"}
+	// rewoken is legacy's same-tick re-wake of the exhausted row, which v2
+	// starts a pass later.
+	rewoken := map[string]string{
+		"row:gc-c:*rewake": "idle-rewake-lag", "provider:Start " + chatName: "idle-rewake-lag", "event:session.woke chat null": "idle-rewake-lag",
+		"runtime:" + chatName:             "idle-rewake-lag",
+		"provider:RemoveMeta " + chatName: "§12.2#38 start-meta-clears",
+	}
+	busy := tlFixture("an idle named session holding assigned work defers until its streak is exhausted", chatIdling,
+		[]parityRow{named}, tlClaim("in_progress", chatName), []simRuntime{tlLive("gc-c")},
+		[]parityStep{
+			{Name: "active", Op: active},
+			{Name: "idle past idle_timeout", Advance: 6 * time.Minute, Ticks: 6},
+		}, tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*a7": "§12.2#51 a7-lag"}), map[string]map[string]string{"idle past idle_timeout": rewoken})
+	busy.Setup = func(tw twin) { // the claim's work dir, which legacy's tick stamps on a named session's work
+		st, _ := tw.row("gw-1")
+		if err := st.SetMetadata("gw-1", "gc.work_dir", tw.city); err != nil {
+			tw.t.Fatal(err)
+		}
+	}
+	busy.Behaviors = []string{"SESS-574", "SESS-575", "SESS-577"}
+	return []timelineFixture{stopped, busy}
 }
