@@ -1419,7 +1419,8 @@ export const zRequestFailedPayload = z.object({
         'session.submit',
         'rig.create'
     ]),
-    request_id: z.string()
+    request_id: z.string(),
+    session_id: z.string().optional()
 });
 
 export const zRigActionBody = z.object({

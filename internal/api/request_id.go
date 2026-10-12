@@ -116,6 +116,18 @@ func (s *Server) emitSessionCreateFailed(requestID, errorCode, errorMessage stri
 	s.emitRequestFailed(requestID, RequestOperationSessionCreate, errorCode, errorMessage)
 }
 
+// emitSessionCreateFailedFor records a session.create failure for a session
+// the create had already written, naming it so the client can find it.
+func (s *Server) emitSessionCreateFailedFor(requestID, sessionID, errorCode, errorMessage string) {
+	s.emitAsyncResult(events.RequestFailed, "", RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    RequestOperationSessionCreate,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		SessionID:    sessionID,
+	})
+}
+
 // emitSessionMessageSucceeded records a request.result.session.message event.
 func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome) {
 	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{

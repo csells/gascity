@@ -213,10 +213,11 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		if waitForCommandable {
 			s.state.Enqueue(reconcilekey.Session(info.ID))
 			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
-			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
+			createdID := info.ID
+			info, createErr = waiter.WaitForSessionCommandable(waitCtx, createdID)
 			cancel()
 			if createErr != nil {
-				s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
+				s.emitSessionCreateFailedFor(reqID, createdID, "create_failed", createErr.Error())
 				return
 			}
 		}

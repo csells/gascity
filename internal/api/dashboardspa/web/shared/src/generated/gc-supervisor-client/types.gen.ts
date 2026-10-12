@@ -2731,6 +2731,10 @@ export type RequestFailedPayload = {
      * Correlation ID from the 202 response.
      */
     request_id: string;
+    /**
+     * Session the request had already created or targeted before it failed. Present on a session.create failure whose session exists, so the client can inspect or clean it up instead of retrying into a duplicate.
+     */
+    session_id?: string;
 };
 
 export type RigActionBody = {

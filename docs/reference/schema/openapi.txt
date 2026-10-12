@@ -6831,6 +6831,10 @@
           "request_id": {
             "description": "Correlation ID from the 202 response.",
             "type": "string"
+          },
+          "session_id": {
+            "description": "Session the request had already created or targeted before it failed. Present on a session.create failure whose session exists, so the client can inspect or clean it up instead of retrying into a duplicate.",
+            "type": "string"
           }
         },
         "required": [
