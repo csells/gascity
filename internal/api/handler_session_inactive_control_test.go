@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,18 @@ func TestStopAndKillOfInactiveSessionAreIdempotent(t *testing.T) {
 		h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/"+op, nil))
 		if rec.Code != http.StatusOK {
 			t.Errorf("%s of an asleep session with no runtime: status = %d, want 200; body: %s", op, rec.Code, rec.Body.String())
+			continue
+		}
+		var body struct {
+			Status string `json:"status"`
+			ID     string `json:"id"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Errorf("%s: decode response: %v", op, err)
+			continue
+		}
+		if body.Status != "ok" || body.ID != info.ID {
+			t.Errorf("%s response = %+v, want status ok id %q", op, body, info.ID)
 		}
 	}
 }
