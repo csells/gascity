@@ -1445,8 +1445,13 @@ func TestResolveProviderChainCodexSuggestArgsReplaceInheritedUnrestricted(t *tes
 	if strings.Contains(defaultLine, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("ResolveDefaultArgs() = %v, preserved inherited unrestricted flag", defaultArgs)
 	}
-	if !strings.Contains(defaultLine, "--ask-for-approval untrusted --sandbox read-only") {
+	// The legacy args name the retired "untrusted" policy; suggest now sends
+	// the on-request flags stock codex accepts.
+	if !strings.Contains(defaultLine, "--ask-for-approval on-request --sandbox read-only") {
 		t.Fatalf("ResolveDefaultArgs() = %v, missing suggest permission flags", defaultArgs)
+	}
+	if strings.Contains(defaultLine, "untrusted") {
+		t.Fatalf("ResolveDefaultArgs() = %v, passes the retired untrusted policy to codex", defaultArgs)
 	}
 	if strings.Count(defaultLine, "--sandbox read-only") != 1 {
 		t.Fatalf("ResolveDefaultArgs() = %v, want one read-only sandbox flag sequence", defaultArgs)
