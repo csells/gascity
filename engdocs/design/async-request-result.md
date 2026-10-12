@@ -87,10 +87,14 @@ carries the full typed response the old sync handler returned.
 
 ## The 202 response
 
-The 202 response body contains ONLY the `request_id`:
+The 202 response body carries the correlation `request_id` and an
+`event_cursor` captured before the request was accepted. Pass it as
+`after_seq` on the city stream, or `after_cursor` on the supervisor
+stream, to receive the result without replaying unrelated backlog.
+City-scoped session operations also return `status: "accepted"`:
 
 ```json
-{ "request_id": "req-a1b2c3d4e5f6a1b2c3d4e5f6" }
+{ "status": "accepted", "request_id": "req-a1b2c3d4e5f6a1b2c3d4e5f6", "event_cursor": "1042" }
 ```
 
 No resource IDs. No session data. No domain fields. The resource
@@ -282,7 +286,9 @@ the request ID instead of emitting a second terminal event.
 3. **Use `context.Background()` in the goroutine.** The HTTP
    request context is cancelled when the 202 is sent.
 
-4. **The 202 response contains ONLY `request_id`.** Nothing else.
+4. **The 202 response contains no resource IDs or domain data.** Only
+   the `request_id`, the event cursor, and (for session operations)
+   `status`.
 
 5. **Every goroutine has panic recovery.** Panics emit
    `request.failed` with `error_code: "internal_error"`. The

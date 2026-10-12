@@ -11408,7 +11408,7 @@ export type GetV0CityByCityNameAgentsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -12025,7 +12025,7 @@ export type GetV0CityByCityNameBeadsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -12218,7 +12218,7 @@ export type GetV0CityByCityNameBeadsReadyData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
     };
@@ -12757,7 +12757,7 @@ export type GetV0CityByCityNameConvoysData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -12884,7 +12884,7 @@ export type GetV0CityByCityNameEventsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -14617,7 +14617,7 @@ export type GetV0CityByCityNameMailData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -17418,7 +17418,7 @@ export type GetV0CityByCityNameRigsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -19327,7 +19327,7 @@ export type GetV0CityByCityNameStatusData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**

@@ -422,10 +422,13 @@ suite against a stateful jq-based mock script.
   provider uses channel-based notification for zero-latency delivery
   in tests.
 
-- **No event retention or rotation.** The JSONL file grows without
-  bound. There is no built-in log rotation, retention policy, or
-  compaction. For long-running cities, manual truncation or external
-  log rotation is needed.
+- **Rotation and retention.** `[events.rotation]` rotates the active
+  `events.jsonl` into gzip archives once it passes `max_size_bytes`
+  (default 256 MiB; rotation is on by default). `Watch` backfills a
+  resume cursor across the archives, so rotation alone loses no
+  events. `archive_retain_age` prunes older archives; a cursor older
+  than the oldest retained event cannot be replayed in full, and the
+  streams do not yet signal that gap.
 
 - **ReadFiltered streams without indexes.** `ReadFiltered` scans the
   JSONL file once, applies `Filter` as it reads, and stops early when a
