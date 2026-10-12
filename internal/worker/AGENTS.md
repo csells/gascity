@@ -54,5 +54,7 @@ when the context ends. Take the bound from the caller's own context.
 
 Codex activity comes from matching native turn lifecycle events, not assistant
 text or token usage. History and tail observations must use the same provider
-parser. Large tool output must not erase the latest turn boundary; a torn final
-record leaves activity unknown.
+parser. Large tool output must not erase the latest turn boundary. A torn final
+record cannot report idle, since it may be the next turn's start, but an open
+turn still reports in-turn. A turn start more than 16 MiB before the end of the
+rollout reports unknown instead of rescanning the whole rollout on every poll.

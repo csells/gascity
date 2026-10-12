@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 )
 
 // codexTokenUsage mirrors the token-usage object the codex CLI embeds in
@@ -47,8 +48,16 @@ type codexUsagePayload struct {
 // model-only metadata. Codex input_tokens already includes cached_input_tokens,
 // so context occupancy uses input_tokens directly. Activity comes only from
 // explicit task_started/task_complete/turn_aborted lifecycle events; assistant
-// text and token usage do not establish completion.
+// text and token usage do not establish completion. Activity is unknown when the
+// latest turn start lies more than 16 MiB before the end of the rollout.
 func ExtractCodexTailMeta(path string) (*TailMeta, error) {
+	return extractCodexTailMeta(path, codexLifecycleScanBudget)
+}
+
+// extractCodexTailMeta is ExtractCodexTailMeta with the lifecycle scan budget
+// supplied by the caller, so tests can drive the budget edge without building a
+// multi-megabyte transcript.
+func extractCodexTailMeta(path string, lifecycleBudget int64) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -70,7 +79,7 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 		return nil, err
 	}
 	meta := extractCodexTailMetaFromLines(lines, startsMidLine, truncated)
-	activity, err := extractCodexLifecycleActivity(snapshot, info.Size())
+	activity, err := extractCodexLifecycleActivity(snapshot, info.Size(), lifecycleBudget)
 	if err != nil {
 		return nil, err
 	}
@@ -83,89 +92,185 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	return meta, nil
 }
 
-// extractCodexLifecycleActivity searches backward to the latest turn start.
-// Tool output can be much larger than the metadata window. Neither losing that
-// start nor seeing a delayed completion for a different turn establishes idle.
-// Reads stop at the latest start and memory is bounded by one JSONL record.
-func extractCodexLifecycleActivity(r io.ReaderAt, size int64) (string, error) {
-	terminalIDs := make(map[string]bool)
-	terminalWithoutID, anyTerminal, firstRecord := false, false, true
-	consume := func(line []byte) (string, bool) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			return "", false
-		}
-		if firstRecord {
-			firstRecord = false
-			// A torn last record could be a new start; do not report the previous idle.
-			if !json.Valid(line) {
-				return "", true
-			}
-		}
-		if !bytes.Contains(line, []byte(`"event_msg"`)) {
-			return "", false
-		}
-		var entry codexRawEntry
-		if json.Unmarshal(line, &entry) != nil || entry.Type != "event_msg" {
-			return "", false
-		}
-		var payload codexUsagePayload
-		if json.Unmarshal(entry.Payload, &payload) != nil {
-			return "", false
-		}
-		switch payload.Type {
-		case "task_started":
-			if terminalWithoutID || terminalIDs[payload.TurnID] || (payload.TurnID == "" && anyTerminal) {
-				return "idle", true
-			}
-			return "in-turn", true
-		case "task_complete", "turn_aborted":
-			anyTerminal = true
-			if payload.TurnID == "" {
-				terminalWithoutID = true
-			} else {
-				terminalIDs[payload.TurnID] = true
-			}
-		}
+// codexLifecycleScanBudget bounds how far back from the end of a rollout
+// extractCodexLifecycleActivity searches for the latest turn start. Every
+// activity poll repeats the search, and everything written since that start is
+// the current turn's output, so an unbounded search costs as much as the turn
+// is large. 16 MiB covers all but the largest turns; past it activity is
+// unknown rather than read from the whole turn on every poll.
+const codexLifecycleScanBudget = 16 << 20 // 16 MiB
+
+// codexLifecycleTypes are the event_msg payload types that decide activity,
+// quoted as they appear in a rollout line. A line naming none of them is
+// skipped without being parsed.
+var codexLifecycleTypes = [][]byte{
+	[]byte(`"task_started"`),
+	[]byte(`"task_complete"`),
+	[]byte(`"turn_aborted"`),
+}
+
+// extractCodexLifecycleActivity reports the activity of the latest turn start
+// within the last budget bytes of the size-byte rollout r: idle when a later
+// task_complete or turn_aborted names its turn, or either omits the turn ID;
+// otherwise in-turn. Tool output can be far larger than the metadata window,
+// so the search goes back to the start itself, and a delayed completion for an
+// older turn does not end the current one. Codex writes its <turn_aborted>
+// marker message immediately before the turn_aborted event, so the event alone
+// ends an aborted turn.
+//
+// A torn final record may be the next turn's start, so it turns idle into
+// unknown but leaves in-turn. A start beyond the budget leaves activity unknown
+// rather than failing, so the caller keeps its tail-window metadata; only a
+// read failure is an error.
+func extractCodexLifecycleActivity(r io.ReaderAt, size, budget int64) (string, error) {
+	scan := codexLifecycleScan{terminalIDs: make(map[string]bool)}
+	activity := ""
+	decided, err := eachLineBackward(r, size, budget, func(line []byte) bool {
+		var done bool
+		activity, done = scan.observe(line)
+		return done
+	})
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("reading Codex lifecycle events: %w", err)
+	case decided:
+		return activity, nil
+	case size > budget:
+		return "", nil
+	default:
+		return scan.withoutStart(), nil
+	}
+}
+
+// codexLifecycleScan folds rollout records, newest first, until the latest
+// turn start.
+type codexLifecycleScan struct {
+	terminalIDs       map[string]bool
+	terminalWithoutID bool
+	sawTerminal       bool
+	sawRecord         bool
+	tornTail          bool
+}
+
+// observe folds one record. It reports the activity, and true, once the record
+// is the turn start that decides it.
+func (s *codexLifecycleScan) observe(line []byte) (string, bool) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
 		return "", false
 	}
-	var pending []byte
-	for end := size; end > 0; {
-		n := min(int64(tailChunkSize), end)
-		end -= n
-		block := make([]byte, int(n))
-		if _, err := r.ReadAt(block, end); err != nil {
-			return "", fmt.Errorf("reading Codex lifecycle: %w", err)
-		}
-		block = append(block, pending...)
-		data := block
-		boundary := len(data)
-		for boundary > 0 {
-			newline := bytes.LastIndexByte(data[:boundary], '\n')
-			if newline < 0 {
-				break
-			}
-			if activity, done := consume(data[newline+1 : boundary]); done {
-				return activity, nil
-			}
-			boundary = newline
-		}
-		if end == 0 {
-			if activity, done := consume(data[:boundary]); done {
-				return activity, nil
-			}
+	if !s.sawRecord {
+		s.sawRecord = true
+		s.tornTail = !json.Valid(line)
+	}
+	payload, ok := codexLifecyclePayload(line)
+	if !ok {
+		return "", false
+	}
+	switch payload.Type {
+	case "task_started":
+		return s.startActivity(payload.TurnID), true
+	case "task_complete", "turn_aborted":
+		s.sawTerminal = true
+		if payload.TurnID == "" {
+			s.terminalWithoutID = true
 		} else {
-			if boundary > maxTailTokenBytes {
-				return "", fmt.Errorf("codex lifecycle record exceeds %d bytes", maxTailTokenBytes)
-			}
-			pending = data[:boundary]
+			s.terminalIDs[payload.TurnID] = true
 		}
 	}
-	// Legacy or retained fragments may have a completion without a start.
-	if anyTerminal {
-		return "idle", nil
+	return "", false
+}
+
+// startActivity reports the activity of the turn started as turnID, given the
+// terminal events already folded from after that start.
+func (s *codexLifecycleScan) startActivity(turnID string) string {
+	if s.terminalWithoutID || s.terminalIDs[turnID] || (turnID == "" && s.sawTerminal) {
+		return s.idle()
 	}
-	return "", nil
+	return "in-turn"
+}
+
+// withoutStart reports the activity of a whole rollout with no turn start.
+// Legacy or retained fragments may hold a completion without its start.
+func (s *codexLifecycleScan) withoutStart() string {
+	if s.sawTerminal {
+		return s.idle()
+	}
+	return ""
+}
+
+// idle reports idle unless the newest record is torn and so may be the next
+// turn's start.
+func (s *codexLifecycleScan) idle() string {
+	if s.tornTail {
+		return ""
+	}
+	return "idle"
+}
+
+// codexLifecyclePayload parses line as an event_msg when it names a lifecycle
+// type. The name check is only a filter: tool output or another event's text
+// can contain the name too.
+func codexLifecyclePayload(line []byte) (codexUsagePayload, bool) {
+	if !slices.ContainsFunc(codexLifecycleTypes, func(name []byte) bool { return bytes.Contains(line, name) }) {
+		return codexUsagePayload{}, false
+	}
+	var entry codexRawEntry
+	if json.Unmarshal(line, &entry) != nil || entry.Type != "event_msg" {
+		return codexUsagePayload{}, false
+	}
+	var payload codexUsagePayload
+	if json.Unmarshal(entry.Payload, &payload) != nil {
+		return codexUsagePayload{}, false
+	}
+	return payload, true
+}
+
+// eachLineBackward calls visit with each line in the last budget bytes of the
+// size-byte r, newest first, until visit returns true, and reports whether it
+// did. A line is visited only when the newline before it was read too or it
+// starts r, so a line cut by the budget is never visited. Reads go backward in
+// tailChunkSize blocks, and a line spanning blocks is joined once, so the cost
+// stays linear in the bytes read.
+func eachLineBackward(r io.ReaderAt, size, budget int64, visit func(line []byte) bool) (bool, error) {
+	floor := max(size-budget, 0)
+	var carry [][]byte // pieces of a line that began before the current block, newest first
+	for end := size; end > floor; {
+		n := min(int64(tailChunkSize), end-floor)
+		end -= n
+		block := make([]byte, n)
+		if _, err := r.ReadAt(block, end); err != nil {
+			return false, fmt.Errorf("reading at offset %d: %w", end, err)
+		}
+		for i := bytes.LastIndexByte(block, '\n'); i >= 0; i = bytes.LastIndexByte(block, '\n') {
+			if visit(joinNewestFirst(block[i+1:], carry)) {
+				return true, nil
+			}
+			carry, block = nil, block[:i]
+		}
+		carry = append(carry, block)
+	}
+	if floor > 0 {
+		return false, nil
+	}
+	return visit(joinNewestFirst(nil, carry)), nil
+}
+
+// joinNewestFirst returns head followed by pieces in reverse order. It returns
+// head itself when there are no pieces.
+func joinNewestFirst(head []byte, pieces [][]byte) []byte {
+	if len(pieces) == 0 {
+		return head
+	}
+	n := len(head)
+	for _, piece := range pieces {
+		n += len(piece)
+	}
+	line := append(make([]byte, 0, n), head...)
+	for i := len(pieces) - 1; i >= 0; i-- {
+		line = append(line, pieces[i]...)
+	}
+	return line
 }
 
 // ExtractCodexTailMetaFromSearchPaths reads Codex tail metadata only after
@@ -202,20 +307,6 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 			scan.latestModel = payload.Model
 			continue
 		}
-		if entry.Type == "event_msg" {
-			switch payload.Type {
-			case "task_started":
-				scan.activity = "in-turn"
-				scan.activeTurnID = payload.TurnID
-			case "task_complete", "turn_aborted":
-				// A delayed completion for another turn must not close the
-				// current one. Older event formats can omit the turn ID.
-				if scan.activeTurnID == "" || payload.TurnID == "" || payload.TurnID == scan.activeTurnID {
-					scan.activity = "idle"
-					scan.activeTurnID = ""
-				}
-			}
-		}
 		if entry.Type == "event_msg" && payload.Type == "token_count" && payload.Info != nil {
 			scan.observeTokenCount(payload.Info)
 		}
@@ -229,8 +320,6 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 // total pairs only with an in-window turn_context, so usage never relabels
 // another model's work.
 type codexTailScan struct {
-	activity            string
-	activeTurnID        string
 	truncated           bool
 	latestModel         string
 	usageModel          string
@@ -294,14 +383,10 @@ func (s *codexTailScan) result() *TailMeta {
 		// model with the prior turn's usage would produce inconsistent context.
 		model = s.usageModel
 	}
-	if model == "" && s.latestUsage == nil && !s.malformedTail && s.activity == "" {
+	if model == "" && s.latestUsage == nil && !s.malformedTail {
 		return nil
 	}
-	result := &TailMeta{Model: model, MalformedTail: s.malformedTail, Activity: s.activity}
-	if s.malformedTail {
-		// A partial final record may be the next turn's start.
-		result.Activity = ""
-	}
+	result := &TailMeta{Model: model, MalformedTail: s.malformedTail}
 	if s.latestUsage == nil {
 		return result
 	}
