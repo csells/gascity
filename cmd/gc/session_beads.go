@@ -1649,12 +1649,18 @@ func (r retiredCleanup) cleanup(id string) {
 }
 
 // clientProviderChat reports whether a session with this origin, running
-// under agent, is a client's provider chat: a manual session (POST /sessions
-// with kind=provider) whose template is the provider's implicit agent, which
-// it runs under only because that agent is named after the provider. The chat
-// has no agent identity of its own, so no agent_name is stamped on it; one
-// would make every later read resolve it as kind "agent" (a pool member of the
-// implicit agent) instead of the provider session its create reported.
+// under agent, is a client's provider chat: a session projected as manual
+// (templateParamsSessionOrigin) whose template is a provider's implicit agent,
+// which it runs under only because that agent is named after the provider.
+// POST /sessions with kind=provider creates one; discovery also projects as
+// manual an ephemeral row of the agent with no pool, named or dependency-only
+// marker (isLegacyManualSessionInfoForAgent). The chat has no agent identity
+// of its own, so no agent_name is stamped on it; one would make every later
+// read resolve it as kind "agent" (a pool member of the implicit agent)
+// instead of the provider session its create reported. A chat that already
+// carries agent_name keeps it: gc session new and a template start stamp one
+// on the manual sessions they create for an implicit agent, which are agent
+// sessions, and the two cannot be told apart.
 func clientProviderChat(origin string, agent *config.Agent) bool {
 	return origin == "manual" && agent != nil && agent.Implicit
 }
