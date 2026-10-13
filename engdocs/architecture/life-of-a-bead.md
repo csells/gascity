@@ -143,6 +143,13 @@ ones. Plain `gc hook` then exits 2 rather than the no-work exit 1, and
 `gc hook --claim` reports an error rather than a `no_work` drain, so a
 worker whose tools are broken does not drain itself as idle.
 
+The same holds across stores. When the hook runs the query against several
+stores (an agent's own store plus rig or city stores) and one of them cannot
+be read, the hook still serves work that another store returned and names
+the unread store on stderr. If no store returned work, the result is the
+failed-query result above, naming the store, not "no work". Only the agent's
+own store's failure is escalated as the session's work-query failure event.
+
 ### The --inject mode
 
 `gc hook --inject` is legacy Stop-hook compatibility. It exits 0 without

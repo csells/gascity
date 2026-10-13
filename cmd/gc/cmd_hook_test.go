@@ -1119,15 +1119,20 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 	}
 }
 
-// TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors is the
+// TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace is the
 // post-merge regression for the primary-store error contract: once the agent's
 // own (primary) store loses its claim race and is dropped from the working set,
-// a later federated store that errors must stay a best-effort skip. The claim
-// must drain as "no work" rather than surface that federated store's error as a
-// fatal claim failure (the bug: bestStoreWithWork keyed "own store" on slice
-// position, so the federated store became index 0 after the primary was removed
-// and wedged the hook).
-func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *testing.T) {
+// a later federated store must not inherit the primary's semantics — its error
+// is not emitted as this session's work-query failure (the original bug:
+// bestStoreWithWork keyed "own store" on slice position, so the federated store
+// became index 0 after the primary was removed).
+//
+// It used to also pin that the claim then drained as "no work". That half is
+// gone: the only store left could not be read, so "no work" was never
+// established, and draining retired a seat on a read that did not happen. The
+// claim now exits 1 with no drain and names the store.
+func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing.T) {
+	zeroClaimRetryPacing(t)
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}}, // primary (own) store
 		{dir: "riga", env: []string{"GC_STORE=riga"}}, // best-effort federated store
@@ -1165,18 +1170,17 @@ func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *test
 	emitted := false
 	var stdout, stderr bytes.Buffer
 	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("claimHookWorkWithRunner = %d, want 0 (clean drain); stderr=%s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 1 (failed read, no drain); stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if emitted {
 		t.Fatal("a federated-store error after the primary lost its race must not emit a work-query failure")
 	}
-	var result hookClaimJSONResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no drain result over an unread store", stdout.String())
 	}
-	if result.Action != "drain" || result.Reason != "no_work" {
-		t.Fatalf("claim result = %+v, want drain/no_work", result)
+	if !strings.Contains(stderr.String(), "riga") {
+		t.Fatalf("stderr = %q, want the unread federated store named", stderr.String())
 	}
 }
 
