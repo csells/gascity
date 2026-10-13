@@ -2020,37 +2020,57 @@ func (t *Tmux) isSessionAttachedForAttach(target string) bool {
 	return attached && err == nil
 }
 
-// WakePane tries to trigger a SIGWINCH in a pane with a resize dance, to wake
-// up Claude Code's event loop by simulating a terminal resize.
+// WakePane tries to trigger a SIGWINCH in target's agent pane with a resize
+// dance, to wake up Claude Code's event loop by simulating a terminal resize.
 //
 // When Claude runs in a detached tmux session, its TUI library may not process
 // stdin until a terminal event occurs. Attaching triggers SIGWINCH which wakes
-// the event loop. The resize dance does not deliver that yet: it sends no
-// SIGWINCH on a single-pane window (ga-vkm6pu) and leaves a split pane one row
-// tall (ga-bwyec7); see the comment inside.
+// the event loop. The dance shrinks the agent pane by one row and restores it:
+// tmux reads -y as an absolute height, so it reads the pane's height first.
+// In a split window both panes resize and get back their heights. A pane
+// that fills its window cannot change height, so a single-pane window gets no
+// SIGWINCH (ga-vkm6pu).
+//
+// The pane is the session's agent pane (see agentPaneTarget), fenced to the
+// session and window it was found in: a bare session target is prefix-matched
+// (worker-1 gone resolves worker-10) and names the window's active pane,
+// which may be a human's split. A pane it cannot name is not resized. A pane
+// id or other explicit target is resized as given.
 //
 // Note: This always attempts the resize. Use WakePaneIfDetached to skip
 // attached sessions where the wake is unnecessary.
 func (t *Tmux) WakePane(target string) {
-	// tmux reads -y as an absolute height, not a delta: "-y -1" always fails
-	// with "height too small", and "-y +1" sets the pane to one row. On a
-	// single-pane window neither call resizes anything, so no SIGWINCH is
-	// sent; on a split window the pane is left one row tall. Both errors are
-	// discarded because the wake is best-effort.
-	_, _ = t.run("resize-pane", "-t", target, "-y", "-1")
-	time.Sleep(50 * time.Millisecond)
-	_, _ = t.run("resize-pane", "-t", target, "-y", "+1")
-}
-
-// WakePaneIfDetached runs WakePane only if the session is detached, so it
-// carries WakePane's limits (ga-vkm6pu, ga-bwyec7). This avoids unnecessary
-// latency on attached sessions where Claude is already processing terminal
-// events.
-func (t *Tmux) WakePaneIfDetached(target string) {
-	if t.IsSessionAttached(target) {
+	out, err := t.readAgentPane(t.run, target, "#{window_id}.#{pane_id} #{pane_height}")
+	if err != nil {
 		return
 	}
-	t.WakePane(target)
+	pane, heightField, _ := strings.Cut(strings.TrimSpace(out), " ")
+	height, err := strconv.Atoi(heightField)
+	if err != nil || height < 2 {
+		return
+	}
+	if validSessionNameRe.MatchString(target) {
+		if !strings.HasPrefix(pane, "@") || !strings.Contains(pane, ".%") {
+			return
+		}
+		target = paneTarget(target) + pane
+	}
+	// Both errors are discarded because the wake is best-effort.
+	_, _ = t.run("resize-pane", "-t", target, "-y", strconv.Itoa(height-1))
+	time.Sleep(50 * time.Millisecond)
+	_, _ = t.run("resize-pane", "-t", target, "-y", strconv.Itoa(height))
+}
+
+// WakePaneIfDetached runs WakePane on pane only if session is detached, so
+// it carries WakePane's limit (ga-vkm6pu). This avoids unnecessary latency on
+// attached sessions where Claude is already processing terminal events. pane
+// is the agent pane the caller already resolved (agentInputTarget), so the
+// wake does not look it up again; a session name is resolved by WakePane.
+func (t *Tmux) WakePaneIfDetached(session, pane string) {
+	if t.IsSessionAttached(session) {
+		return
+	}
+	t.WakePane(pane)
 }
 
 func (t *Tmux) providerEnv(target string) string {
@@ -3124,7 +3144,7 @@ func (t *Tmux) nudgeSession(
 	// even though tmux delivers the bytes (no error). SIGWINCH kicks the
 	// render/input loop so the paste is actually consumed. The post-send wake
 	// below remains for the submit Enter.
-	t.WakePaneIfDetached(session)
+	t.WakePaneIfDetached(session, target)
 
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
@@ -3202,7 +3222,7 @@ func (t *Tmux) nudgeSession(
 
 	// 5. Wake detached panes before Enter. Some TUIs accept pasted input while
 	// detached but drop the submit key until a terminal resize wakes their loop.
-	t.WakePaneIfDetached(session)
+	t.WakePaneIfDetached(session, target)
 
 	// 6. Send the provider's declared submit key sequence (see
 	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
@@ -3233,7 +3253,7 @@ func (t *Tmux) nudgeSession(
 	sendSubmit := func() error {
 		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(target, submitKeys) })
 	}
-	wake := func() { t.WakePaneIfDetached(session) }
+	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
 		confirmed, sawIdle, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
 		if isLookRefusal(err) {
@@ -3381,7 +3401,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 	// 4. Wake detached panes before Enter. See NudgeSession for why this
 	// happens before and after submit.
-	t.WakePaneIfDetached(pane)
+	t.WakePaneIfDetached(pane, pane)
 
 	// 5. Send the provider's declared submit key sequence with retry
 	// (critical for message submission). See NudgeSession/nudgeSubmitKeySequences.
@@ -3396,7 +3416,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 			continue
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
-		t.WakePaneIfDetached(pane)
+		t.WakePaneIfDetached(pane, pane)
 		delivered = true
 		return nil
 	}
@@ -3819,38 +3839,19 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	return first.target, nil
 }
 
-// agentPaneOption is the pane user option that marks a session's agent pane;
-// its value is the owning session's id ("$3"), so a gc agent pane joined into
-// another session, or an option set at window, session or global scope (which
-// format lookup would inherit onto every pane), never reads as that session's
-// agent. Every create path sets it on the session's only pane (markAgentPane),
-// then sets agentSessionOption on the session. A pane option belongs to the
-// pane, not its position: it survives respawn-pane, split-window -b,
-// swap-pane, rotate-window, break-pane and new-window -b, and a pane a human
-// adds does not inherit it.
-//
-// list-panes rows lead with agentPaneMarkerFormat, which expands to a word
-// rather than the raw option (the executor trims output, so an empty leading
-// field would vanish from the first row):
-//   - "agent": the session's marked agent pane;
-//   - "orphan": any other pane of a marked session;
-//   - "pane": a pane of a session created before the marker.
+// The agent-pane marker and its classifier are shared with the ssh provider
+// (see [runtime.TmuxAgentPaneOption]); these names keep this file readable.
 const (
-	agentPaneOption       = "@gc_agent"
-	agentSessionOption    = "@gc_agent_session"
-	agentPaneMarkerFormat = "#{?#{==:#{" + agentPaneOption + "},#{session_id}},agent,#{?#{" + agentSessionOption + "},orphan,pane}}"
-	agentPaneMarked       = "agent"
-	agentPaneOrphan       = "orphan"
+	agentPaneOption       = runtime.TmuxAgentPaneOption
+	agentSessionOption    = runtime.TmuxAgentSessionOption
+	agentPaneMarkerFormat = runtime.TmuxAgentPaneMarkerFormat
+	agentPaneMarked       = runtime.TmuxAgentPaneMarked
 )
 
-// errAgentPaneGone reports a marked session whose agent pane no longer exists
-// (a human killed it and the session lives on in their panes). Callers fail
-// closed: writes refuse, IsPaneDead reports dead, the kill plan is empty.
-var errAgentPaneGone = errors.New("agent pane is gone")
-
-// errAgentPaneAmbiguous reports more than one pane marked as a session's
-// agent pane. Callers fail closed rather than guess.
-var errAgentPaneAmbiguous = errors.New("agent pane is ambiguous")
+var (
+	errAgentPaneGone      = runtime.ErrTmuxAgentPaneGone
+	errAgentPaneAmbiguous = runtime.ErrTmuxAgentPaneAmbiguous
+)
 
 // agentPaneWarningOut receives agent-pane marking warnings (a var so tests
 // can capture it).
@@ -3920,36 +3921,8 @@ func (t *Tmux) readAgentPane(run func(...string) (string, error), target, format
 	return fields, nil
 }
 
-// pickAgentPaneRow returns the fields of the one "agent" row of list-panes
-// output whose rows are "<agent|orphan|pane>\t<fields>". With no agent row,
-// a marked session (any "orphan" row) has lost its agent pane
-// (errAgentPaneGone), and an unmarked one falls back to its first row. Two
-// agent rows are errAgentPaneAmbiguous. Empty output yields "", which each
-// reader reports as its own empty-answer error.
-func pickAgentPaneRow(out string) (string, error) {
-	rows := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	agent, marked := -1, false
-	for i, row := range rows {
-		switch mark, _, _ := strings.Cut(row, "\t"); mark {
-		case agentPaneMarked:
-			if agent >= 0 {
-				return "", errAgentPaneAmbiguous
-			}
-			agent = i
-		case agentPaneOrphan:
-			marked = true
-		}
-	}
-	switch {
-	case agent >= 0:
-		_, fields, _ := strings.Cut(rows[agent], "\t")
-		return fields, nil
-	case marked:
-		return "", errAgentPaneGone
-	}
-	_, fields, _ := strings.Cut(rows[0], "\t")
-	return fields, nil
-}
+// pickAgentPaneRow is [runtime.PickTmuxAgentPaneRow].
+func pickAgentPaneRow(out string) (string, error) { return runtime.PickTmuxAgentPaneRow(out) }
 
 // agentPaneTarget returns a tmux target for a session's agent pane, fenced to
 // the session and window it was found in ("=name:@W.%P"): pane ids are
@@ -4378,7 +4351,7 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
 func processMatchesNames(pid string, names []string) bool {
-	nameSet := processNameSet(names)
+	nameSet := proctable.ProcessNameSet(names)
 	if len(nameSet) == 0 {
 		return false
 	}
@@ -4399,7 +4372,7 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	return processMatchesNameSet(commPath, string(out), nameSet)
+	return proctable.ProcessMatchesNameSet(commPath, string(out), nameSet)
 }
 
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
@@ -5323,12 +5296,13 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 
 // claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
 // elapsed timer with a token-stream / interrupt suffix in parentheses, e.g.
-// "(2m 28s · ↓ 10.9k tokens)" or "(28m 11s • esc to interrupt)". Current Claude
-// Code (notably bypass-permissions mode) shows this spinner instead of a bare
-// "esc to interrupt" string while busy. Anchored on "(<digits><m|s>" before the
+// "(2m 28s · ↓ 10.9k tokens)", "(28m 11s • esc to interrupt)", or, once a turn
+// passes an hour, "(1h 2m 3s · ↓ 18.5k tokens)". Current Claude Code (notably
+// bypass-permissions mode) shows this spinner instead of a bare "esc to
+// interrupt" string while busy. Anchored on "(<digits><h|m|s>" before the
 // "·"/"•" separator so it does NOT match idle chrome — "(ctrl+o to expand)",
 // "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
-var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
+var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[hms][^)]*[·•]`)
 
 // claudeBareGerundSpinnerRe matches Claude Code's spinner row before it has
 // gained the elapsed-timer suffix claudeBusySpinnerRe matches -- e.g.
