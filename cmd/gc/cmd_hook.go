@@ -772,8 +772,8 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // The claim ops carry the CLASS axis (claim_class_route.go): every store in the
 // federated set is a bd WORKSPACE, and a relocated coordination class is not
 // one, so the binding is reached through the ops rather than through a leg. On a
-// city that relocates nothing the route is nil and the ops value is the one this
-// function has always passed.
+// city that relocates nothing the route is nil and the ops are the work-store
+// ops alone.
 func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
@@ -786,7 +786,10 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	// Work-store writes announce themselves to the city's event log so the run
+	// views see a claim within a poll (hook_claim_bead_events.go). They are
+	// wrapped before the class route, whose binding writes announce themselves.
+	ops := classRoutedHookClaimOps(withHookClaimBeadEvents(hookClaimOps{}, cityPath), route)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 

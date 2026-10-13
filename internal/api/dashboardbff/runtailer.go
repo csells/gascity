@@ -190,7 +190,7 @@ type cityRunTailer struct {
 	// syncCh carries catch-up requests (see sync): the loop folds the log
 	// through its current end, publishes, and closes each request's channel.
 	syncCh chan chan struct{}
-	cancel  context.CancelFunc
+	cancel context.CancelFunc
 
 	// snapshotCache caches the folded run snapshot (and the formula target
 	// derived from it) per fold generation so a same-generation repeat request
