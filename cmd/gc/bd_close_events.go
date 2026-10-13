@@ -70,47 +70,70 @@ func announceBdPassthroughCloses(cityPath string, store beads.Store, before map[
 // closedSnapshots reads ids back after a close and returns, in input order,
 // the ones that now read closed, each with its edge set confirmed.
 func closedSnapshots(emitter *emittingClassStore, ids []string) []beads.Bead {
+	read := readBackRows(emitter, ids, events.BeadClosed)
+	var closed []beads.Bead
+	for _, id := range ids {
+		if bead, ok := read[id]; ok && beadStatusIsClosed(bead.Status) {
+			closed = append(closed, bead)
+		}
+	}
+	return withConfirmedEdgesBatch(emitter, closed)
+}
+
+// readBackRows reads ids back after a write: in one batched read where the
+// store has one, and one at a time for whatever the batch did not answer
+// exactly. An id that cannot be read is left out and reported, never filled
+// with a bare id, which would clobber the row in every fold that applies it.
+func readBackRows(emitter *emittingClassStore, ids []string, eventType string) map[string]beads.Bead {
+	if len(ids) == 0 {
+		return nil
+	}
 	read, err := beads.PrefetchExact(emitter.Store, ids)
-	if err != nil {
+	if err != nil || read == nil {
 		read = map[string]beads.Bead{}
 	}
-	var closed []beads.Bead
-	var edgeless []string
 	for _, id := range ids {
-		bead, ok := read[id]
-		if !ok {
-			got, err := emitter.Get(id)
-			if err != nil || strings.TrimSpace(got.ID) == "" {
-				warnClassStoreEmit(fmt.Errorf("bead.closed skipped: %s could not be re-read after gc bd closed it", id))
-				continue
-			}
-			bead = got
-		}
-		if !beadStatusIsClosed(bead.Status) {
+		if _, ok := read[id]; ok {
 			continue
 		}
+		got, err := emitter.Get(id)
+		if err != nil || strings.TrimSpace(got.ID) == "" {
+			warnClassStoreEmit(fmt.Errorf("%s skipped: %s could not be re-read after the write", eventType, id))
+			continue
+		}
+		read[id] = got
+	}
+	return read
+}
+
+// withConfirmedEdgesBatch is emittingClassStore.withConfirmedEdges for several
+// rows at once: the rows that carry no edges have them confirmed in one batched
+// read where the store has one, and one at a time otherwise.
+func withConfirmedEdgesBatch(emitter *emittingClassStore, rows []beads.Bead) []beads.Bead {
+	var edgeless []string
+	for _, bead := range rows {
 		if len(bead.Dependencies) == 0 {
 			edgeless = append(edgeless, bead.ID)
 		}
-		closed = append(closed, bead)
 	}
 	edges, batched := batchDownEdges(emitter.Store, edgeless)
-	for i := range closed {
-		bead := closed[i]
-		if len(bead.Dependencies) > 0 {
+	out := make([]beads.Bead, 0, len(rows))
+	for _, bead := range rows {
+		switch {
+		case len(bead.Dependencies) > 0:
 			bead.Needs = nil
-		} else if batched {
+		case batched:
 			bead.Dependencies = edges[bead.ID]
 			if bead.Dependencies == nil {
 				bead.Dependencies = []beads.Dep{}
 			}
 			bead.Needs = nil
-		} else {
+		default:
 			bead = emitter.withConfirmedEdges(bead)
 		}
-		closed[i] = bead
+		out = append(out, bead)
 	}
-	return closed
+	return out
 }
 
 // batchDownEdges reads the DOWN edges of several beads in one round trip, and
@@ -125,7 +148,7 @@ func batchDownEdges(store beads.Store, ids []string) (map[string][]beads.Dep, bo
 	edges, err := lister.DepListBatch(ids)
 	if err != nil || edges == nil {
 		if err != nil && !errors.Is(err, beads.ErrDepListBatchUnsupported) {
-			warnClassStoreEmit(fmt.Errorf("confirming the edges of %d closed beads: %w", len(ids), err))
+			warnClassStoreEmit(fmt.Errorf("confirming the edges of %d beads: %w", len(ids), err))
 		}
 		return nil, false
 	}
