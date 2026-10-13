@@ -325,13 +325,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// Canonical Run resource — the ONE typed run projection, sourced from the
 	// city event log.
-	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
-	cityGet(sm, "/runs/census", (*Server).humaHandleRunsCensus, errorStatuses(http.StatusServiceUnavailable))
-	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
-	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable), describes(runProjectionFreshness))
+	cityGet(sm, "/runs/census", (*Server).humaHandleRunsCensus, errorStatuses(http.StatusServiceUnavailable), describes(runProjectionFreshness))
+	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable), describes(runProjectionFreshness))
+	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable), describes(runProjectionFreshness))
 	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
 		op.DefaultStatus = http.StatusAccepted
-	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("A successful cancel folds its own writes into the run projection before it responds, so a GET /runs/{run_id} or /runs/{run_id}/steps issued after the 202 reports the run and its open steps canceled."))
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
