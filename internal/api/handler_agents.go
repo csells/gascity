@@ -373,8 +373,11 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
 
-// findActiveBeadForAssigneesWithFreshness uses targeted assignee queries.
-// Live reads batch identities per store; cached reads stop at the first match.
+// findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
+// highest-priority identity: identity order first, then store order, then
+// newest first within a store. Cached reads use a targeted ListQuery with
+// Limit=1 per identity and store, stopping at the first match; live reads go
+// through findLiveActiveBeadInStores.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
@@ -396,54 +399,24 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
-	if live && len(unique) > 0 {
-		// A detail read must be fresh, but each backing List can spawn database
-		// commands. Batch aliases into one query per store instead of paying
-		// that cost once for every possible identity. Keep assignee priority
-		// above rig order, and newest-first within a rig, as on the cached path.
-		firstByAssignee := make(map[string]string, len(unique))
-		for _, rn := range rigNames {
-			matches, err := stores[rn].List(beads.ListQuery{
-				Assignees: unique,
-				Status:    "in_progress",
-				Live:      true,
-				Sort:      beads.SortCreatedDesc,
-			})
-			if err != nil {
-				log.Printf("api: looking up active work in rig %q: %v", rn, err)
-				continue
-			}
-			for _, match := range matches {
-				if seen[match.Assignee] && firstByAssignee[match.Assignee] == "" {
-					firstByAssignee[match.Assignee] = match.ID
-				}
-			}
-		}
-		for _, assignee := range unique {
-			if id := firstByAssignee[assignee]; id != "" {
-				return id
-			}
-		}
-		return ""
+	if live {
+		return findLiveActiveBeadInStores(stores, rigNames, unique)
 	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
 			query := beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
-				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			}
-			if !live {
-				if cached, ok := stores[rn].(cachedListStore); ok {
-					matches, cacheOK := cached.CachedList(query)
-					if cacheOK {
-						if len(matches) > 0 {
-							return matches[0].ID
-						}
-						continue
+			if cached, ok := stores[rn].(cachedListStore); ok {
+				matches, cacheOK := cached.CachedList(query)
+				if cacheOK {
+					if len(matches) > 0 {
+						return matches[0].ID
 					}
+					continue
 				}
 			}
 			matches, err := stores[rn].List(query)
@@ -456,6 +429,57 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	return ""
+}
+
+// findLiveActiveBeadInStores makes one live List call per store for all
+// identities instead of one per identity, because each live read can spawn
+// database commands. How far a store narrows that call varies:
+// DoltliteReadStore filters with assignee IN (...), NativeDoltStore issues one
+// keyed read per identity, and BdStore (given more than one identity) and
+// SQLiteStore read the store's whole in_progress set and filter it
+// client-side. Precedence matches the cached path. Reading stops once the
+// first identity has a match, since no later store can outrank it.
+func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
+	if len(identities) == 0 {
+		return ""
+	}
+	firstByIdentity := make(map[string]string, len(identities))
+	for _, rn := range rigNames {
+		for _, match := range liveActiveWork(stores[rn], rn, identities) {
+			if _, ok := firstByIdentity[match.Assignee]; !ok {
+				firstByIdentity[match.Assignee] = match.ID
+			}
+		}
+		if firstByIdentity[identities[0]] != "" {
+			break
+		}
+	}
+	for _, identity := range identities {
+		if id := firstByIdentity[identity]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// liveActiveWork returns a store's in_progress beads assigned to any of the
+// identities, newest first. A failed read is logged and skipped, but a partial
+// result keeps the rows that did decode: one unreadable bead must not hide the
+// session's own work.
+func liveActiveWork(store beads.Store, rig string, identities []string) []beads.Bead {
+	matches, err := store.List(beads.ListQuery{
+		Assignees: identities,
+		Status:    "in_progress",
+		Live:      true,
+		Sort:      beads.SortCreatedDesc,
+	})
+	if err != nil {
+		log.Printf("api: looking up active work in rig %q: %v", rig, err)
+		if !beads.IsPartialResult(err) {
+			return nil
+		}
+	}
+	return matches
 }
 
 // providerPathCheck returns the binary name to check for PATH availability.
