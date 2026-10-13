@@ -2096,8 +2096,9 @@ timeout, a killed query, a locked database, or bd's circuit breaker failing
 fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
 unknown, not empty. This applies with and without --claim. Any other
 work-query failure exits 2 without --claim and 1 with --claim. Neither writes a
-drain result. Only the agent's own store reports: other stores the hook also
-searches are best-effort, and one that fails reads as having no work.
+drain result. When another store the hook searches serves work, a store that
+failed is named on stderr and the work is served; when no store has work, a
+failed read of any of them is a failed query, not an empty queue.
 
 The agent is determined from $GC_AGENT or a positional argument.
 
