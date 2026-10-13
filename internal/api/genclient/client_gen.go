@@ -3643,10 +3643,25 @@ type Run struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// RunCancelInterruptFailure defines model for RunCancelInterruptFailure.
+type RunCancelInterruptFailure struct {
+	// Error Why the interrupt failed.
+	Error string `json:"error"`
+
+	// Session Session ID, or the step assignee when it could not be resolved to a session.
+	Session string `json:"session"`
+}
+
 // RunCancelOutputBody defines model for RunCancelOutputBody.
 type RunCancelOutputBody struct {
-	// Closed Count of the run's beads closed by the cancel.
+	// Closed Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
 	Closed int64 `json:"closed"`
+
+	// InterruptFailures Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+	InterruptFailures *[]RunCancelInterruptFailure `json:"interrupt_failures,omitempty"`
+
+	// Interrupted IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+	Interrupted *[]string `json:"interrupted,omitempty"`
 
 	// RunId The canceled run.
 	RunId string `json:"run_id"`

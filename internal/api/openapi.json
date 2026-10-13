@@ -7449,13 +7449,51 @@
         ],
         "type": "object"
       },
+      "RunCancelInterruptFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "description": "Why the interrupt failed.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session ID, or the step assignee when it could not be resolved to a session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "error"
+        ],
+        "type": "object"
+      },
       "RunCancelOutputBody": {
         "additionalProperties": false,
         "properties": {
           "closed": {
-            "description": "Count of the run's beads closed by the cancel.",
+            "description": "Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.",
             "format": "int64",
             "type": "integer"
+          },
+          "interrupt_failures": {
+            "description": "Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.",
+            "items": {
+              "$ref": "#/components/schemas/RunCancelInterruptFailure"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "interrupted": {
+            "description": "IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "run_id": {
             "description": "The canceled run.",
@@ -50009,7 +50047,7 @@
     },
     "/v0/city/{cityName}/session/{id}/stop": {
       "post": {
-        "description": "Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. An interrupt_now submit interrupts the turn the same way but leaves background terminals running.",
+        "description": "Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. An interrupt_now submit interrupts the turn the same way but leaves background terminals running. A runtime that can interrupt the turn neither by keys nor by protocol gets nothing sent and answers 501 turn_interrupt_unsupported.",
         "operationId": "post-v0-city-by-city-name-session-by-id-stop",
         "parameters": [
           {

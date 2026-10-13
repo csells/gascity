@@ -6,10 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // closeFailStore delegates every read to an embedded store but fails CloseAll,
@@ -613,5 +616,196 @@ func TestRunCancelReachesNestedDrainItemRoots(t *testing.T) {
 	// run + drain + item + item step + nested drain + grandchild + its step.
 	if out.Body.Closed != 7 {
 		t.Errorf("closed = %d, want 7 (both workflow levels below the run, minus completed and teardown work)", out.Body.Closed)
+	}
+}
+
+// runCancelInterruptFixture is a run whose steps are being worked by live
+// sessions, alongside sessions that hold no canceled work.
+type runCancelInterruptFixture struct {
+	fs             *fakeState
+	runID          string
+	stepWorker     session.Info // holds an in-progress step of the run
+	itemWorker     session.Info // holds an in-progress step of a nested drain item
+	teardownWorker session.Info // holds only the run's spared teardown step
+	otherRunWorker session.Info // holds an in-progress step of a different run
+	goneWorker     session.Info // holds a step of the run, but its runtime is gone
+}
+
+func newRunCancelInterruptFixture(t *testing.T) runCancelInterruptFixture {
+	t.Helper()
+	fs := newSessionFakeState(t)
+	store := fs.stores["myrig"]
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return created
+	}
+	workflowRoot := func(title, drainControlID string) beads.Bead {
+		meta := map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"}
+		if drainControlID != "" {
+			meta["gc.drain_control_id"] = drainControlID
+		}
+		return create(beads.Bead{Title: title, Type: "molecule", Metadata: meta})
+	}
+	member := func(title, rootID string, extra map[string]string) beads.Bead {
+		meta := map[string]string{"gc.root_bead_id": rootID}
+		for k, v := range extra {
+			meta[k] = v
+		}
+		return create(beads.Bead{Title: title, Type: "task", Metadata: meta})
+	}
+	claim := func(b beads.Bead, assignee string) {
+		t.Helper()
+		status := "in_progress"
+		if err := store.Update(b.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f := runCancelInterruptFixture{
+		fs:             fs,
+		stepWorker:     createTestSession(t, fs.cityBeadStore, fs.sp, "run-step-worker"),
+		itemWorker:     createTestSession(t, fs.cityBeadStore, fs.sp, "item-step-worker"),
+		teardownWorker: createTestSession(t, fs.cityBeadStore, fs.sp, "teardown-worker"),
+		otherRunWorker: createTestSession(t, fs.cityBeadStore, fs.sp, "other-run-worker"),
+		goneWorker:     createTestSession(t, fs.cityBeadStore, fs.sp, "gone-worker"),
+	}
+
+	run := workflowRoot("implement run", "")
+	f.runID = run.ID
+	// A pool worker's claim is recorded under its session bead ID.
+	claim(member("implement step", run.ID, nil), f.stepWorker.ID)
+	claim(member("cleanup", run.ID, map[string]string{"gc.scope_role": "teardown", "gc.step_id": "cleanup"}), f.teardownWorker.ID)
+	claim(member("stale step", run.ID, nil), f.goneWorker.ID)
+	member("queued step", run.ID, nil) // open and unclaimed: nobody is working it
+	drain := member("drain work", run.ID, map[string]string{"gc.kind": "drain"})
+	item := workflowRoot("do-work item", drain.ID)
+	// A manual session's claim is recorded under its session name.
+	claim(member("item step", item.ID, nil), f.itemWorker.SessionName)
+
+	other := workflowRoot("other run", "")
+	claim(member("other step", other.ID, nil), f.otherRunWorker.ID)
+
+	if err := fs.sp.Stop(f.goneWorker.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func interruptCount(sp *runtime.Fake, sessionName string) int {
+	n := 0
+	for _, call := range sp.Calls {
+		if call.Method == "Interrupt" && call.Name == sessionName {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunCancelInterruptsSessionsWorkingTheRun guards the live gap where a
+// canceled run's graph closed durably but the session executing one of its
+// steps kept running its turn, foreground tool included. The cancel must
+// interrupt the current turn of every live session holding an in-progress step
+// the cancel closed, nested drain items included, exactly once each, and leave
+// alone sessions working other runs, sessions holding only the spared teardown
+// tail, and sessions whose runtime is already gone. Nothing is killed: a pool
+// session may serve other work.
+func TestRunCancelInterruptsSessionsWorkingTheRun(t *testing.T) {
+	f := newRunCancelInterruptFixture(t)
+	s := &Server{state: f.fs}
+
+	out, err := s.humaHandleRunCancel(context.Background(), &RunCancelInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     f.runID,
+	})
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
+	}
+
+	for _, owner := range []session.Info{f.stepWorker, f.itemWorker} {
+		if got := interruptCount(f.fs.sp, owner.SessionName); got != 1 {
+			t.Errorf("session %s (%s) interrupts = %d, want 1: it was executing a step the cancel closed", owner.ID, owner.Title, got)
+		}
+		if !f.fs.sp.IsRunning(owner.SessionName) {
+			t.Errorf("session %s (%s) is no longer running; cancel must interrupt the turn, not kill the session", owner.ID, owner.Title)
+		}
+	}
+	for _, bystander := range []session.Info{f.teardownWorker, f.otherRunWorker, f.goneWorker} {
+		if got := interruptCount(f.fs.sp, bystander.SessionName); got != 0 {
+			t.Errorf("session %s (%s) interrupts = %d, want 0", bystander.ID, bystander.Title, got)
+		}
+	}
+
+	wantInterrupted := []string{f.stepWorker.ID, f.itemWorker.ID}
+	slices.Sort(wantInterrupted)
+	gotInterrupted := slices.Clone(out.Body.Interrupted)
+	slices.Sort(gotInterrupted)
+	if !slices.Equal(gotInterrupted, wantInterrupted) {
+		t.Errorf("interrupted = %v, want %v", out.Body.Interrupted, wantInterrupted)
+	}
+	if len(out.Body.InterruptFailures) != 0 {
+		t.Errorf("interrupt_failures = %+v, want none", out.Body.InterruptFailures)
+	}
+}
+
+// interruptFailProvider is the fake runtime with Interrupt failing for one
+// session, standing in for a runtime that cannot reach that session's pane.
+type interruptFailProvider struct {
+	*runtime.Fake
+	failName string
+}
+
+func (p interruptFailProvider) Interrupt(name string) error {
+	if name == p.failName {
+		return errors.New("simulated interrupt failure")
+	}
+	return p.Fake.Interrupt(name)
+}
+
+// TestRunCancelSucceedsWhenInterruptFails guards the best-effort contract: the
+// graph cancel is already durable when the interrupts run, so a session that
+// cannot be interrupted is reported rather than turned into a failed cancel,
+// and the other holders are still interrupted.
+func TestRunCancelSucceedsWhenInterruptFails(t *testing.T) {
+	f := newRunCancelInterruptFixture(t)
+	f.fs.sessionProvider = interruptFailProvider{Fake: f.fs.sp, failName: f.stepWorker.SessionName}
+	s := &Server{state: f.fs}
+
+	out, err := s.humaHandleRunCancel(context.Background(), &RunCancelInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     f.runID,
+	})
+	if err != nil {
+		t.Fatalf("cancel error: %v, want success: the graph cancel is durable even when an interrupt fails", err)
+	}
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
+	}
+	root, err := f.fs.stores["myrig"].Get(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Status != "closed" || root.Metadata["gc.outcome"] != "canceled" {
+		t.Errorf("run root = status %q outcome %q, want closed canceled", root.Status, root.Metadata["gc.outcome"])
+	}
+
+	if len(out.Body.InterruptFailures) != 1 {
+		t.Fatalf("interrupt_failures = %+v, want exactly the session whose interrupt failed", out.Body.InterruptFailures)
+	}
+	failure := out.Body.InterruptFailures[0]
+	if failure.Session != f.stepWorker.ID || !strings.Contains(failure.Error, "simulated interrupt failure") {
+		t.Errorf("interrupt failure = %+v, want session %s with the runtime's error", failure, f.stepWorker.ID)
+	}
+	if !slices.Equal(out.Body.Interrupted, []string{f.itemWorker.ID}) {
+		t.Errorf("interrupted = %v, want [%s]: one failure must not stop the other interrupts", out.Body.Interrupted, f.itemWorker.ID)
+	}
+	if got := interruptCount(f.fs.sp, f.itemWorker.SessionName); got != 1 {
+		t.Errorf("item worker interrupts = %d, want 1", got)
 	}
 }

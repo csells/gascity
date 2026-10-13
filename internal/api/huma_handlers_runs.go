@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -357,15 +359,24 @@ const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
 // POST /v0/city/{cityName}/runs/{run_id}/cancel. It stamps cancel intent on the
 // run root and synchronously winds the run down — closing the root and its open
 // beads with a canceled outcome so the dispatcher finds no more ready work and
-// the run starves. Registered with a 202 default status: in-flight sessions
-// finish their current step before idling, so the wind-down is accepted, not
-// instantaneous.
+// the run starves. Closing the graph does not stop work already executing, so
+// the session holding each in-progress step the cancel closed then has its
+// current turn interrupted (interruptRunHolders), the same interrupt as
+// POST /session/{id}/stop; the sessions are not killed. Registered with a 202
+// default status: the interrupts are best-effort and a session may take a
+// moment to settle, so the wind-down is accepted, not instantaneous.
 func (s *Server) humaHandleRunCancel(ctx context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
 	runID := strings.TrimSpace(input.RunID)
 	res, err := s.cancelRun(runID)
+	// Interrupt before judging err: the holders are those of roots whose close
+	// already landed, and a retry after a later root's failure no longer sees
+	// their steps in progress, so it could not interrupt them.
+	// The graph close is durable, so a client that hangs up does not get to
+	// abandon the interrupts it implies.
+	interrupted, failures := s.interruptRunHolders(context.WithoutCancel(ctx), runID, res.holders)
 	if err != nil {
 		// A store read/write failed mid-cancel: do NOT report a cancellation we
-		// could not substantiate. 503 is retryable; the run keeps running.
+		// could not substantiate. 503 is retryable; the run root stays open.
 		return nil, apierr.ServiceUnavailable.Msgf("run cancel failed: %v", err)
 	}
 	if !res.found {
@@ -379,6 +390,8 @@ func (s *Server) humaHandleRunCancel(ctx context.Context, input *RunCancelInput)
 	out.Body.RunID = runID
 	out.Body.Status = res.status
 	out.Body.Closed = res.closed
+	out.Body.Interrupted = interrupted
+	out.Body.InterruptFailures = failures
 	return out, nil
 }
 
@@ -406,6 +419,10 @@ type cancelRunResult struct {
 	terminal bool      // every matching root was already terminal (nothing to cancel)
 	closed   int       // beads newly closed by the cancel
 	status   RunStatus // resulting run status
+	// holders are the assignees of the in-progress beads the cancel durably
+	// closed, in first-seen order and possibly repeated: whoever was executing
+	// canceled work when the cancel landed.
+	holders []string
 }
 
 // cancelRun winds down the run rooted at runID across every workflow store,
@@ -427,7 +444,8 @@ type cancelRunResult struct {
 // only through gc.drain_control_id, so a sweep of the run's own members left
 // them open and their steps claimable after the run reported canceled.
 // Any store read/write failure is returned so the caller reports a 5xx rather
-// than a phantom success.
+// than a phantom success; res.holders still names the holders of the roots
+// closed before the failure.
 func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 	var res cancelRunResult
 	for _, info := range s.workflowStores() {
@@ -454,17 +472,19 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 				if isClosedStatus(item.Status) {
 					continue
 				}
-				n, err := cancelWorkflowRoot(info.store, item.ID)
+				n, holders, err := cancelWorkflowRoot(info.store, item.ID)
 				res.closed += n
 				if err != nil {
 					return res, err
 				}
+				res.holders = append(res.holders, holders...)
 			}
-			n, err := cancelWorkflowRoot(info.store, root.ID)
+			n, holders, err := cancelWorkflowRoot(info.store, root.ID)
 			res.closed += n
 			if err != nil {
 				return res, err
 			}
+			res.holders = append(res.holders, holders...)
 			res.status = RunStatusCanceled
 		}
 	}
@@ -479,12 +499,22 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 // teardown tail. A nested drain item root is canceled exactly like the run
 // root: it is a workflow root in its own right, so its own controls read
 // gc.cancel_requested off it and its own teardown tail still runs.
-func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
+//
+// It also returns the assignees of the members that were in progress when the
+// close swept them, read before the close (which erases that status). They are
+// returned only when the close succeeded, so a caller interrupts nobody over
+// work that is still open. A spared teardown step is not swept, so its holder
+// is not returned.
+func cancelWorkflowRoot(store beads.Store, rootID string) (int, []string, error) {
 	exclude, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return sourceworkflow.CloseWorkflowSubtreeAsExcept(
+	holders, err := inProgressAssignees(store, rootID, exclude)
+	if err != nil {
+		return 0, nil, err
+	}
+	n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(
 		store,
 		rootID,
 		beadmeta.OutcomeCanceled,
@@ -492,6 +522,129 @@ func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
 		map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
 		exclude,
 	)
+	if err != nil {
+		return n, nil, err
+	}
+	return n, holders, nil
+}
+
+// inProgressAssignees returns the assignees of the in-progress members of the
+// workflow rooted at rootID that a close sparing exclude would sweep: the same
+// member set CloseWorkflowSubtreeAsExcept closes, narrowed to claimed work.
+func inProgressAssignees(store beads.Store, rootID string, exclude func(beads.Bead) bool) ([]string, error) {
+	members, err := sourceworkflow.ListWorkflowBeads(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	var assignees []string
+	for _, member := range members {
+		if member.Status != "in_progress" || (exclude != nil && exclude(member)) {
+			continue
+		}
+		if assignee := strings.TrimSpace(member.Assignee); assignee != "" {
+			assignees = append(assignees, assignee)
+		}
+	}
+	return assignees, nil
+}
+
+// interruptRunHolders interrupts the current turn of each live session among
+// holders — assignees of in-progress steps a run cancel closed — so a step
+// that was executing (a foreground tool included) stops rather than running on
+// after its run was canceled. It is the interrupt POST /session/{id}/stop
+// sends (session.Manager.StopTurn); no session is killed, because a pool
+// session may go on to serve other work.
+//
+// An assignee resolves to its session through the API's session target
+// resolution (bead ID, session name, alias, configured named identity), as the
+// ?assignee bead filter does. One that names no open session, or a session
+// that is suspended or whose runtime is not running, has no turn to interrupt
+// and is skipped.
+//
+// Best-effort: the graph cancel is already durable, so a failure is logged and
+// returned for the response rather than failing the cancel. Distinct sessions
+// are interrupted concurrently, since a provider's interrupt can wait for the
+// session to settle. Returns the interrupted session IDs, in holder order, and
+// the failures.
+func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders []string) ([]string, []RunCancelInterruptFailure) {
+	if len(holders) == 0 {
+		return nil, nil
+	}
+	var failures []RunCancelInterruptFailure
+	fail := func(sessionRef string, err error) {
+		log.Printf("gc api: run %s canceled, but interrupting %s failed: %v", runID, sessionRef, err)
+		failures = append(failures, RunCancelInterruptFailure{Session: sessionRef, Error: err.Error()})
+	}
+	var unique []string
+	seenHolder := map[string]bool{}
+	for _, holder := range holders {
+		if !seenHolder[holder] {
+			seenHolder[holder] = true
+			unique = append(unique, holder)
+		}
+	}
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		for _, holder := range unique {
+			fail(holder, errors.New("no session store configured"))
+		}
+		return nil, failures
+	}
+
+	var ids []string
+	seenID := map[string]bool{}
+	for _, holder := range unique {
+		id, err := s.resolveSessionTargetIDWithContext(ctx, store, holder, apiSessionResolveOptions{})
+		if errors.Is(err, session.ErrSessionNotFound) {
+			continue // not an open session: nothing is executing under it
+		}
+		if err != nil {
+			fail(holder, err)
+			continue
+		}
+		if !seenID[id] {
+			seenID[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	sp := s.state.SessionProvider()
+	results := make([]error, len(ids))
+	skipped := make([]bool, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mgr := s.sessionManager(store)
+			info, err := mgr.Get(id)
+			if err != nil {
+				results[i] = err
+				return
+			}
+			// StopTurn's own guard (a suspended or stopped session has no
+			// turn), checked first so such a session is neither waited on nor
+			// reported as interrupted.
+			if info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName) {
+				skipped[i] = true
+				return
+			}
+			results[i] = mgr.StopTurn(id)
+		}()
+	}
+	wg.Wait()
+
+	var interrupted []string
+	for i, id := range ids {
+		switch {
+		case skipped[i]:
+		case results[i] != nil:
+			fail(id, results[i])
+		default:
+			interrupted = append(interrupted, id)
+		}
+	}
+	return interrupted, failures
 }
 
 // findWorkflowRoots returns the graph-workflow roots in store that match runID

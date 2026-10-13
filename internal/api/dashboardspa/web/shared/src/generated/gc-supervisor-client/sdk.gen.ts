@@ -1103,7 +1103,7 @@ export const respondSession = <ThrowOnError extends boolean = false>(options: Op
 /**
  * Post v0 city by city name session by ID stop
  *
- * Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. An interrupt_now submit interrupts the turn the same way but leaves background terminals running.
+ * Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. An interrupt_now submit interrupts the turn the same way but leaves background terminals running. A runtime that can interrupt the turn neither by keys nor by protocol gets nothing sent and answers 501 turn_interrupt_unsupported.
  */
 export const postV0CityByCityNameSessionByIdStop = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdStopData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdStopResponses, PostV0CityByCityNameSessionByIdStopErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/stop', ...options });
 
