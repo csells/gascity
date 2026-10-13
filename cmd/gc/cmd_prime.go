@@ -453,13 +453,13 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionName:       sessionName,
 			}))
 		}
-		if hookMode && a.Implicit && strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) == "manual" {
-			// A client's provider chat (POST /sessions with kind=provider)
-			// runs under the provider's implicit agent only because that
-			// agent is named after the provider. It is not a pool worker:
-			// the worker persona tells the agent to claim queue work and
-			// drain, which ends the client's conversation after one turn.
-			// Like an unmanaged hook, it gets no persona.
+		if hookMode && isClientProviderChat(&a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS")) {
+			// A client's provider chat gets no worker persona (see
+			// isClientProviderChat); the controller's launch channel drops
+			// it with the same predicate. Unlike the unmanaged-hook exit
+			// above, this one deliberately comes after the nudge poller
+			// starts: the chat is a live session gc started, so nudges
+			// queued for it still reach it.
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0, nil
 		}
