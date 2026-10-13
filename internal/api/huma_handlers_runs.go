@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/api/dashboardbff"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -78,6 +79,39 @@ type RunProjectionGraceSource interface {
 	RunProjectionMissInGrace(context.Context, string, string) bool
 	ForgetRunProjectionMiss(context.Context, string, string)
 }
+
+// runProjectionFreshness is the freshness contract every run read documents.
+const runProjectionFreshness = "Run reads are a projection of the city event log, not a direct store read. " +
+	"A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads within about a second; " +
+	"a successful POST /runs/{run_id}/cancel is reflected before its response. " +
+	"A change another process writes straight to the bead store (a worker's `gc hook --claim` or `bd close`) reaches the log, and these reads, " +
+	"when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). " +
+	"From then on these reads agree with GET /bead/{id}, which serves the same supervisor view."
+
+// RunProjectionSyncSource folds everything already appended to the city's
+// event log into the warm projection before it returns. A handler that just
+// wrote run state through the supervisor's cache — whose bead.* events are
+// recorded synchronously — calls it so the caller's next point read reflects
+// that write (read-your-writes) instead of waiting for the next poll. The bool
+// is false when the projection could not be synced (unknown city, tailer not
+// running, ctx done); the projection then catches up on its own.
+type RunProjectionSyncSource interface {
+	SyncRunProjection(context.Context, string) bool
+}
+
+// The dashboard plane is production's run projection source; a source that
+// silently stopped satisfying the sync capability would quietly drop the
+// cancel's read-your-writes, so pin it at compile time.
+var _ interface {
+	RunProjectionSource
+	RunProjectionGraceSource
+	RunProjectionSyncSource
+} = (*dashboardbff.Plane)(nil)
+
+// runCancelProjectionSyncTimeout bounds how long a successful cancel waits for
+// the projection to fold its events. The cancel has already committed, so
+// running out only forfeits read-your-writes for this one response.
+const runCancelProjectionSyncTimeout = 5 * time.Second
 
 // runFold reads the warm incremental projection when the injected census source
 // provides it. Direct Server users without that capability retain the legacy
@@ -319,7 +353,7 @@ const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
 // the run starves. Registered with a 202 default status: in-flight sessions
 // finish their current step before idling, so the wind-down is accepted, not
 // instantaneous.
-func (s *Server) humaHandleRunCancel(_ context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
+func (s *Server) humaHandleRunCancel(ctx context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
 	runID := strings.TrimSpace(input.RunID)
 	res, err := s.cancelRun(runID)
 	if err != nil {
@@ -333,11 +367,30 @@ func (s *Server) humaHandleRunCancel(_ context.Context, input *RunCancelInput) (
 	if res.terminal {
 		return nil, apierr.ConflictWrongState.Msgf("run %s is already terminal; nothing to cancel", runID)
 	}
+	s.syncRunProjectionAfterWrite(ctx)
 	out := &RunCancelOutput{}
 	out.Body.RunID = runID
 	out.Body.Status = res.status
 	out.Body.Closed = res.closed
 	return out, nil
+}
+
+// syncRunProjectionAfterWrite gives the caller read-your-writes on the run
+// projection after a write this handler made through the supervisor's cache:
+// the write's bead.* events are already in the event log, and this folds them
+// before the response goes out. It costs no store call — one stat and a read of
+// the newly appended log bytes — and is a no-op for a source that cannot sync
+// (the legacy on-disk fold re-reads the log whenever it changed).
+func (s *Server) syncRunProjectionAfterWrite(ctx context.Context) {
+	source, ok := s.runCensusSource.(RunProjectionSyncSource)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, runCancelProjectionSyncTimeout)
+	defer cancel()
+	if !source.SyncRunProjection(ctx, s.state.CityName()) {
+		log.Printf("gc api: run projection did not catch up after a run write; the next read may be stale until the next poll")
+	}
 }
 
 // cancelRunResult is the outcome of a cancelRun wind-down.

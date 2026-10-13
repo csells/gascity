@@ -948,26 +948,36 @@ export const createRig = <ThrowOnError extends boolean = false>(options: Options
 
 /**
  * Get v0 city by city name runs
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A change another process writes straight to the bead store (a worker's `gc hook --claim` or `bd close`) reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRuns = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsResponses, GetV0CityByCityNameRunsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs', ...options });
 
 /**
  * Get v0 city by city name runs census
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A change another process writes straight to the bead store (a worker's `gc hook --claim` or `bd close`) reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRunsCensus = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsCensusData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsCensusResponses, GetV0CityByCityNameRunsCensusErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/census', ...options });
 
 /**
  * Get v0 city by city name runs by run ID
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A change another process writes straight to the bead store (a worker's `gc hook --claim` or `bd close`) reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRunsByRunId = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsByRunIdData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsByRunIdResponses, GetV0CityByCityNameRunsByRunIdErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/{run_id}', ...options });
 
 /**
  * Post v0 city by city name runs by run ID cancel
+ *
+ * A successful cancel folds its own writes into the run projection before it responds, so a GET /runs/{run_id} or /runs/{run_id}/steps issued after the 202 reports the run and its open steps canceled.
  */
 export const postV0CityByCityNameRunsByRunIdCancel = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameRunsByRunIdCancelData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameRunsByRunIdCancelResponses, PostV0CityByCityNameRunsByRunIdCancelErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/{run_id}/cancel', ...options });
 
 /**
  * Get v0 city by city name runs by run ID steps
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A change another process writes straight to the bead store (a worker's `gc hook --claim` or `bd close`) reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRunsByRunIdSteps = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsByRunIdStepsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsByRunIdStepsResponses, GetV0CityByCityNameRunsByRunIdStepsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/{run_id}/steps', ...options });
 
