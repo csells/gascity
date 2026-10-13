@@ -263,6 +263,41 @@ func TestHookClaimSkipsStepUnderCanceledParentRun(t *testing.T) {
 	f.wantClosed(stranded.ID, "canceled")
 }
 
+// TestHookClaimSkipsStepsUnderRunMarkedCanceling covers the window a run
+// cancel opens with its first write: the run root is still open and carries
+// only gc.cancel_requested, while the cancel interrupts the run's sessions and
+// closes its beads. A worker polling in that window, an interrupted one
+// included, must not claim the run's open steps or those of a drain item
+// workflow whose own root is still open.
+func TestHookClaimSkipsStepsUnderRunMarkedCanceling(t *testing.T) {
+	f := newHookWorkflowStopFixture(t)
+	run := f.root("implement", "")
+	runStep := f.step("review", run.ID, nil)
+	drain := f.create(beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{
+		"gc.root_bead_id": run.ID,
+		"gc.kind":         "drain",
+	}})
+	item := f.root("do-work", drain.ID)
+	itemStep := f.step("implement", item.ID, nil)
+	if err := f.store.SetMetadata(run.ID, "gc.cancel_requested", "true"); err != nil {
+		t.Fatal(err)
+	}
+	f.served = []string{runStep.ID, itemStep.ID}
+
+	got, stderr := f.run()
+
+	if got != "" {
+		t.Fatalf("handed out %q, want nothing; stderr=%s", got, stderr)
+	}
+	for _, id := range []string{runStep.ID, itemStep.ID} {
+		f.wantNeverClaimed(id)
+		f.wantClosed(id, "canceled")
+	}
+	if root := f.get(run.ID); root.Status == "closed" {
+		t.Fatalf("run root closed by the claim gate; closing it is the cancel's job")
+	}
+}
+
 // TestHookClaimStillServesTeardownTailUnderFailedRoot pins the exemption: the
 // teardown tail runs after its root settles by contract (it may branch on
 // ROOT_OUTCOME and releases the workflow's resources), so a settled root must

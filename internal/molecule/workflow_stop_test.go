@@ -94,3 +94,38 @@ func TestWorkflowStopReasonCancelBeatsSettleAndSparesTeardown(t *testing.T) {
 		t.Fatalf("teardown: stop=%+v err=%v, want exempt", stop, err)
 	}
 }
+
+// TestStoppedWorkflowAncestorStopsOnCancelMarkOfOpenRun pins the state a run
+// cancel creates with its first write: the run root still open, carrying only
+// gc.cancel_requested, every member and drain item root still open. That mark
+// alone must stop the run's steps and the steps of a nested item workflow whose
+// own root is live, so no claim lands while the cancel closes the rest.
+func TestStoppedWorkflowAncestorStopsOnCancelMarkOfOpenRun(t *testing.T) {
+	store := beads.NewMemStore()
+	create := func(meta map[string]string) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Title: "b", Type: "task", Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	run := create(map[string]string{"gc.kind": "workflow"})
+	runStep := create(map[string]string{"gc.root_bead_id": run.ID})
+	drain := create(map[string]string{"gc.root_bead_id": run.ID, "gc.kind": "drain"})
+	item := create(map[string]string{"gc.kind": "workflow", "gc.drain_control_id": drain.ID})
+	itemStep := create(map[string]string{"gc.root_bead_id": item.ID})
+	if err := store.SetMetadata(run.ID, "gc.cancel_requested", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, step := range []beads.Bead{runStep, itemStep} {
+		stop, err := WorkflowStopReason(store, step)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stop.RootID != run.ID || !stop.Canceled || stop.Outcome() != "canceled" {
+			t.Errorf("step %s under a run marked canceling: stop=%+v, want run %s canceled", step.ID, stop, run.ID)
+		}
+	}
+}

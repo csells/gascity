@@ -8,9 +8,12 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -258,14 +261,15 @@ func TestRunCancelStoreFailureReports503(t *testing.T) {
 	}
 }
 
-// TestRunCancelAtomicRootCloseFailureRollsBackMarker guards the partial-close
-// finding on an atomic store: when the root's close fails AFTER its cancel marker
-// was written in the same transaction, the atomic Tx rolls the marker back. The
-// root stays open with no half-set gc.cancel_requested / gc.outcome=canceled, so
-// nothing strands it projecting "canceling"; the caller still gets a retryable
-// 5xx. This exercises the metadata-write-succeeds-then-close-fails path that a
-// fake failing CloseAll before mutation cannot reach.
-func TestRunCancelAtomicRootCloseFailureRollsBackMarker(t *testing.T) {
+// TestRunCancelAtomicRootCloseFailureLeavesRunCancelingForRetry pins what a
+// root close that fails after its metadata write leaves behind on an atomic
+// store. The cancel marks the run root canceling (gc.cancel_requested) as its
+// first write, before it interrupts anyone or closes anything, so that claims
+// and controls stop while the rest of the wind-down runs. The failed close's
+// transaction rolls back its own writes, so the root stays open without a
+// canceled outcome, still marked canceling, and the caller gets a retryable
+// 5xx. Retrying the cancel completes the close.
+func TestRunCancelAtomicRootCloseFailureLeavesRunCancelingForRetry(t *testing.T) {
 	fs := newFakeState(t)
 	mem := fs.stores["myrig"]
 	root, err := mem.Create(beads.Bead{
@@ -280,15 +284,13 @@ func TestRunCancelAtomicRootCloseFailureRollsBackMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reads and the descendant close batch use the real store; the root's
-	// transactional close fails after its marker write, and AtomicTx=true forces
-	// the whole Tx to roll back.
+	// transactional close fails after its metadata write, and AtomicTx=true
+	// forces the whole Tx to roll back.
 	fs.stores["myrig"] = txCloseFailStore{Store: mem, failCloseID: root.ID}
 	s := &Server{state: fs}
+	input := &RunCancelInput{CityScope: CityScope{CityName: "test-city"}, RunID: root.ID}
 
-	_, err = s.humaHandleRunCancel(context.Background(), &RunCancelInput{
-		CityScope: CityScope{CityName: "test-city"},
-		RunID:     root.ID,
-	})
+	_, err = s.humaHandleRunCancel(context.Background(), input)
 	if err == nil {
 		t.Fatal("cancel with a failing atomic root close returned nil error, want a retryable 5xx")
 	}
@@ -303,11 +305,27 @@ func TestRunCancelAtomicRootCloseFailureRollsBackMarker(t *testing.T) {
 	if after.Status == "closed" {
 		t.Error("root was closed despite the reported close failure")
 	}
-	if got := after.Metadata["gc.cancel_requested"]; got != "" {
-		t.Errorf("root gc.cancel_requested = %q, want empty — the atomic Tx must roll the marker back on a failed close", got)
-	}
 	if got := after.Metadata["gc.outcome"]; got == "canceled" {
-		t.Error("root gc.outcome was rewritten to canceled despite the close failing; the marker must roll back")
+		t.Error("root gc.outcome was written as canceled despite its close rolling back")
+	}
+	if got := after.Metadata["gc.cancel_requested"]; got != "true" {
+		t.Errorf("root gc.cancel_requested = %q, want true: the cancel intent is recorded before the close, so the run stays stopped while the client retries", got)
+	}
+
+	fs.stores["myrig"] = mem
+	out, err := s.humaHandleRunCancel(context.Background(), input)
+	if err != nil {
+		t.Fatalf("retried cancel error: %v, want it to complete the wind-down", err)
+	}
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("retried cancel status = %q, want canceled", out.Body.Status)
+	}
+	after, err = mem.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "canceled" {
+		t.Errorf("root after retry = status %q outcome %q, want closed canceled", after.Status, after.Metadata["gc.outcome"])
 	}
 }
 
@@ -807,5 +825,263 @@ func TestRunCancelSucceedsWhenInterruptFails(t *testing.T) {
 	}
 	if got := interruptCount(f.fs.sp, f.itemWorker.SessionName); got != 1 {
 		t.Errorf("item worker interrupts = %d, want 1", got)
+	}
+}
+
+// cancelOrderLog records, in order, the operations of a run cancel that decide
+// how soon the run's work stops: the durable canceling mark on the run root,
+// each session interrupt, and the start and end of each close batch.
+// interrupted closes once wantInterrupts interrupts have been issued.
+type cancelOrderLog struct {
+	mu             sync.Mutex
+	ops            []string
+	wantInterrupts int
+	interrupts     int
+	interrupted    chan struct{}
+}
+
+func newCancelOrderLog(wantInterrupts int) *cancelOrderLog {
+	return &cancelOrderLog{wantInterrupts: wantInterrupts, interrupted: make(chan struct{})}
+}
+
+func (l *cancelOrderLog) interrupt(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ops = append(l.ops, "interrupt "+name)
+	l.interrupts++
+	if l.interrupts == l.wantInterrupts {
+		close(l.interrupted)
+	}
+}
+
+func (l *cancelOrderLog) add(op string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ops = append(l.ops, op)
+}
+
+func (l *cancelOrderLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.ops)
+}
+
+func (l *cancelOrderLog) index(prefix string) int {
+	return slices.IndexFunc(l.snapshot(), func(op string) bool { return strings.HasPrefix(op, prefix) })
+}
+
+// slowCloseStore stands in for a bd-backed store, where every close costs a
+// subprocess call. Each close batch holds until every expected session
+// interrupt has been issued, so a cancel whose interrupts wait on its closes
+// stalls on every batch until closeStall runs out, and the recorded order
+// shows it.
+type slowCloseStore struct {
+	beads.Store
+	runID string
+	log   *cancelOrderLog
+}
+
+// closeStall bounds how long one close batch waits for an interrupt. It is
+// spent only when the cancel orders the interrupt after the closes.
+const closeStall = 2 * time.Second
+
+func (s slowCloseStore) markOf(id string, kvs map[string]string) {
+	if id == s.runID && kvs["gc.cancel_requested"] != "" {
+		s.log.add("mark run")
+	}
+}
+
+func (s slowCloseStore) SetMetadata(id, key, value string) error {
+	s.markOf(id, map[string]string{key: value})
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s slowCloseStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.markOf(id, kvs)
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s slowCloseStore) CloseAll(ids []string, kvs map[string]string) (int, error) {
+	for _, id := range ids {
+		s.markOf(id, kvs)
+	}
+	s.log.add("close begin " + strings.Join(ids, ","))
+	select {
+	case <-s.log.interrupted:
+	case <-time.After(closeStall):
+	}
+	n, err := s.Store.CloseAll(ids, kvs)
+	s.log.add("close end " + strings.Join(ids, ","))
+	return n, err
+}
+
+// interruptRecordingProvider is the fake runtime recording each interrupt in
+// the cancel order log.
+type interruptRecordingProvider struct {
+	*runtime.Fake
+	log *cancelOrderLog
+}
+
+func (p interruptRecordingProvider) Interrupt(name string) error {
+	p.log.interrupt(name)
+	return p.Fake.Interrupt(name)
+}
+
+// TestRunCancelMarksRunThenInterruptsBeforeClosesFinish guards the live gap in
+// which a canceled run's steps kept executing for 10 to 21 seconds after the
+// cancel request: the cancel closed the whole graph, one bd call at a time,
+// and only then interrupted the sessions working it, so a short step could
+// finish and land its effects inside that window. The cancel must first make
+// the run durably canceling (the gc.cancel_requested mark on the run root that
+// the claim gate and the dispatcher's control gate stop on), then interrupt the
+// sessions holding its in-progress steps without waiting for the graph closes,
+// which run alongside.
+func TestRunCancelMarksRunThenInterruptsBeforeClosesFinish(t *testing.T) {
+	f := newRunCancelInterruptFixture(t)
+	// The run step's and the drain item step's holders.
+	log := newCancelOrderLog(2)
+	f.fs.stores["myrig"] = slowCloseStore{Store: f.fs.stores["myrig"], runID: f.runID, log: log}
+	f.fs.sessionProvider = interruptRecordingProvider{Fake: f.fs.sp, log: log}
+	s := &Server{state: f.fs}
+
+	out, err := s.humaHandleRunCancel(context.Background(), &RunCancelInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     f.runID,
+	})
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	ops := log.snapshot()
+	t.Logf("cancel order: %q", ops)
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
+	}
+
+	if len(ops) == 0 || ops[0] != "mark run" {
+		t.Fatalf("first operation = %q, want the run root marked canceling before any interrupt or close", ops)
+	}
+	firstCloseEnd := log.index("close end ")
+	interrupts := 0
+	for i, op := range ops {
+		if !strings.HasPrefix(op, "interrupt ") {
+			continue
+		}
+		interrupts++
+		if firstCloseEnd >= 0 && i > firstCloseEnd {
+			t.Errorf("%s at op %d came after a close batch finished at op %d; the interrupts must not wait for the graph closes (ops = %q)", op, i, firstCloseEnd, ops)
+		}
+	}
+	if interrupts != 2 {
+		t.Errorf("interrupts issued = %d, want 2; ops = %q", interrupts, ops)
+	}
+	for _, owner := range []session.Info{f.stepWorker, f.itemWorker} {
+		if got := interruptCount(f.fs.sp, owner.SessionName); got != 1 {
+			t.Errorf("session %s interrupts = %d, want 1", owner.Title, got)
+		}
+	}
+	root, err := f.fs.stores["myrig"].Get(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Status != "closed" || root.Metadata["gc.outcome"] != "canceled" {
+		t.Errorf("run root = status %q outcome %q, want closed canceled", root.Status, root.Metadata["gc.outcome"])
+	}
+}
+
+// failCloseOnceStore fails the first close batch that includes failID, standing
+// in for a store write that fails partway through a cancel.
+type failCloseOnceStore struct {
+	beads.Store
+	failID string
+	failed *bool
+}
+
+func (s failCloseOnceStore) CloseAll(ids []string, kvs map[string]string) (int, error) {
+	if !*s.failed && slices.Contains(ids, s.failID) {
+		*s.failed = true
+		return 0, errors.New("simulated store write failure")
+	}
+	return s.Store.CloseAll(ids, kvs)
+}
+
+// TestRunCancelPartialFailureStopsClaimsAndRetryCompletes covers a cancel
+// that fails after its first write. The run root's canceling mark is that
+// write, so even with every close still pending the run is stopped: the claim
+// gate refuses the open steps, the run's own and those of a drain item
+// workflow whose root is still open, because both chains reach the marked run
+// root. The 5xx is retryable, and the retry completes the wind-down.
+func TestRunCancelPartialFailureStopsClaimsAndRetryCompletes(t *testing.T) {
+	fs := newFakeState(t)
+	mem := fs.stores["myrig"]
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := mem.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return created
+	}
+	run := create(beads.Bead{Title: "implement run", Type: "molecule", Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"}})
+	runStep := create(beads.Bead{Title: "run step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": run.ID}})
+	drain := create(beads.Bead{Title: "drain work", Type: "task", Metadata: map[string]string{"gc.root_bead_id": run.ID, "gc.kind": "drain"}})
+	item := create(beads.Bead{Title: "do-work item", Type: "molecule", Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.drain_control_id": drain.ID}})
+	itemStep := create(beads.Bead{Title: "item step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": item.ID}})
+
+	failed := false
+	// The first close of the cancel (the drain item's steps, deepest first)
+	// fails, so the canceling mark is the only write that lands.
+	fs.stores["myrig"] = failCloseOnceStore{Store: mem, failID: itemStep.ID, failed: &failed}
+	s := &Server{state: fs}
+	input := &RunCancelInput{CityScope: CityScope{CityName: "test-city"}, RunID: run.ID}
+
+	if _, err := s.humaHandleRunCancel(context.Background(), input); err == nil || !strings.Contains(err.Error(), "run cancel failed") {
+		t.Fatalf("cancel with a failing close err = %v, want a retryable cancel-failed 5xx", err)
+	}
+	if !failed {
+		t.Fatal("the simulated close failure never fired")
+	}
+	runAfter, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runAfter.Status == "closed" || runAfter.Metadata["gc.cancel_requested"] != "true" {
+		t.Fatalf("run root = status %q gc.cancel_requested %q, want open and marked canceling", runAfter.Status, runAfter.Metadata["gc.cancel_requested"])
+	}
+	for _, id := range []string{runStep.ID, itemStep.ID} {
+		step, err := mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if step.Status == "closed" {
+			t.Fatalf("step %s closed; this test needs the failure to land before any close", id)
+		}
+		stop, err := molecule.WorkflowStopReason(mem, step)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !stop.Stopped() || !stop.Canceled || stop.RootID != run.ID {
+			t.Errorf("claim gate for open step %s = %+v, want it stopped as canceled by run root %s", id, stop, run.ID)
+		}
+	}
+
+	out, err := s.humaHandleRunCancel(context.Background(), input)
+	if err != nil {
+		t.Fatalf("retried cancel error: %v", err)
+	}
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("retried cancel status = %q, want canceled", out.Body.Status)
+	}
+	// run + run step + drain + item + item step.
+	if out.Body.Closed != 5 {
+		t.Errorf("retried cancel closed = %d, want 5", out.Body.Closed)
+	}
+	for _, id := range []string{run.ID, runStep.ID, drain.ID, item.ID, itemStep.ID} {
+		b, err := mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Status != "closed" || b.Metadata["gc.outcome"] != "canceled" {
+			t.Errorf("%s (%s) = status %q outcome %q, want closed canceled", id, b.Title, b.Status, b.Metadata["gc.outcome"])
+		}
 	}
 }

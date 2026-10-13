@@ -356,27 +356,40 @@ func (s *Server) forgetRunProjectionMiss(ctx context.Context, runID string) {
 const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
 
 // humaHandleRunCancel is the Huma-typed handler for
-// POST /v0/city/{cityName}/runs/{run_id}/cancel. It stamps cancel intent on the
-// run root and synchronously winds the run down — closing the root and its open
-// beads with a canceled outcome so the dispatcher finds no more ready work and
-// the run starves. Closing the graph does not stop work already executing, so
-// the session holding each in-progress step the cancel closed then has its
-// current turn interrupted (interruptRunHolders), the same interrupt as
-// POST /session/{id}/stop; the sessions are not killed. Registered with a 202
-// default status: the interrupts are best-effort and a session may take a
+// POST /v0/city/{cityName}/runs/{run_id}/cancel. Its first write marks the run
+// root canceling (gc.cancel_requested), which stops new work at once: the claim
+// gate refuses the run's steps, nested drain items included, and the
+// dispatcher closes its controls. It then interrupts the current turn of each
+// session holding an in-progress step of the run (interruptRunHolders, the same
+// interrupt as POST /session/{id}/stop; the sessions are not killed) while it
+// closes the root and its open beads with a canceled outcome. The interrupts
+// do not wait for the closes, which cost a store write each. Registered with a
+// 202 default status: the interrupts are best-effort and a session may take a
 // moment to settle, so the wind-down is accepted, not instantaneous.
 func (s *Server) humaHandleRunCancel(ctx context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
 	runID := strings.TrimSpace(input.RunID)
-	res, err := s.cancelRun(runID)
-	// Interrupt before judging err: the holders are those of roots whose close
-	// already landed, and a retry after a later root's failure no longer sees
-	// their steps in progress, so it could not interrupt them.
-	// The graph close is durable, so a client that hangs up does not get to
-	// abandon the interrupts it implies.
-	interrupted, failures := s.interruptRunHolders(context.WithoutCancel(ctx), runID, res.holders)
+	// The run is durably canceling before any interrupt starts, so a client
+	// that hangs up does not get to abandon the interrupts it implies.
+	interruptCtx := context.WithoutCancel(ctx)
+	var (
+		interrupts  sync.WaitGroup
+		interrupted []string
+		failures    []RunCancelInterruptFailure
+	)
+	res, err := s.cancelRun(runID, func(holders []string) {
+		interrupts.Add(1)
+		go func() {
+			defer interrupts.Done()
+			interrupted, failures = s.interruptRunHolders(interruptCtx, runID, holders)
+		}()
+	})
+	// Wait out the interrupts even when a close failed: they were issued under
+	// a run already marked canceling, and the response is their only report.
+	interrupts.Wait()
 	if err != nil {
 		// A store read/write failed mid-cancel: do NOT report a cancellation we
-		// could not substantiate. 503 is retryable; the run root stays open.
+		// could not substantiate. 503 is retryable; the run root stays open,
+		// marked canceling if the mark landed, and a retry completes the close.
 		return nil, apierr.ServiceUnavailable.Msgf("run cancel failed: %v", err)
 	}
 	if !res.found {
@@ -419,35 +432,56 @@ type cancelRunResult struct {
 	terminal bool      // every matching root was already terminal (nothing to cancel)
 	closed   int       // beads newly closed by the cancel
 	status   RunStatus // resulting run status
-	// holders are the assignees of the in-progress beads the cancel durably
-	// closed, in first-seen order and possibly repeated: whoever was executing
-	// canceled work when the cancel landed.
-	holders []string
+}
+
+// runCancelTarget is one open run root a cancel winds down, and the IDs of the
+// open workflow roots of its tree it closes, deepest first and the run root
+// last.
+type runCancelTarget struct {
+	store     beads.Store
+	root      beads.Bead
+	workflows []string
 }
 
 // cancelRun winds down the run rooted at runID across every workflow store,
 // closing each open root and its still-OPEN member beads with a canceled
-// outcome. It reuses the workflow teardown close ordering (descendants before
-// the root, blockers before blocked) so a strict store accepts the batch. The
-// cancel-intent marker is stamped root-only, together with the root's own close:
-// on an atomic store the two commit as one transaction, so a failed close
-// persists neither and never strands an open, half-marked root; on a non-atomic
-// store the marker is durably recorded so the returned 5xx's retry completes the
-// wind-down. Already-terminal runs (and already-closed members) are left
-// untouched — closing a completed member would rewrite its recorded outcome. The
-// run's teardown tail (molecule.TeardownTailExclusion) is excluded from this
-// close: it runs AFTER the root reaches a terminal state by contract, and its
-// pass condition may read ROOT_OUTCOME, which this cancel's own close just
-// stamped — force-closing it unexecuted would strand the resources it releases.
-// The wind-down reaches drain item workflows nested under the run at any depth
-// (sourceworkflow.NestedDrainItemRoots): each is its own root, linked to the run
-// only through gc.drain_control_id, so a sweep of the run's own members left
-// them open and their steps claimable after the run reported canceled.
-// Any store read/write failure is returned so the caller reports a 5xx rather
-// than a phantom success; res.holders still names the holders of the roots
-// closed before the failure.
-func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
+// outcome, in three steps ordered so the run's work stops as early as it can:
+//
+//  1. Mark each open run root canceling: gc.cancel_requested, one write per
+//     root and none when a previous attempt already marked it. From here on
+//     the claim gate (molecule.WorkflowStopReason) refuses every open step of
+//     the run, including the steps of drain item workflows whose own roots
+//     are still open, since their ancestry reaches the marked root; the
+//     dispatcher's control gate closes the run's controls; the workflow
+//     finalizer settles as canceled; and the run projects "canceling".
+//  2. Read the run's workflow tree (sourceworkflow.WorkflowTree: the run and
+//     every drain item workflow nested under it at any depth, one member read
+//     per workflow) and collect the assignees of the in-progress steps the
+//     close will sweep, then hand them to interrupt, which must not block: the
+//     interrupts run alongside the closes. The tree is read after the mark, so
+//     a claim that landed before the mark is seen here and one after it is
+//     refused by the gate.
+//  3. Close each open workflow, nested drain items deepest first and the run
+//     root last, reusing the workflow teardown close ordering (descendants
+//     before the root, blockers before blocked) so a strict store accepts the
+//     batch. Each root's close stamps the cancel marker on it too, so a nested
+//     item's own controls stop as canceled.
+//
+// Any store read/write failure is returned so the caller reports a retryable
+// 5xx rather than a phantom success. Every state a failure (or a crash) can
+// leave is one a retry completes: the run root stays open until its own close,
+// the last write, so the retry finds the run again instead of 409ing; if the
+// mark landed the run is already stopped meanwhile; already-closed members and
+// nested roots are left as they are, and the retry interrupts whoever still
+// holds an in-progress step. Already-terminal runs (and already-closed members)
+// are left untouched: closing a completed member would rewrite its recorded
+// outcome. Each workflow's teardown tail (molecule.TeardownTailExclusion) is
+// spared: it runs AFTER its root reaches a terminal state by contract, and its
+// pass condition may read ROOT_OUTCOME, which this cancel's own close stamps;
+// force-closing it unexecuted would strand the resources it releases.
+func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (cancelRunResult, error) {
 	var res cancelRunResult
+	var targets []runCancelTarget
 	for _, info := range s.workflowStores() {
 		if info.store == nil {
 			continue
@@ -461,35 +495,44 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 			if isClosedStatus(root.Status) {
 				continue // already terminal — nothing to wind down
 			}
-			// Nested drain item workflows first, deepest first, the run root
-			// last: if any close fails the run root is still open, so the 5xx's
-			// retry finds the run again instead of 409ing over open nested work.
-			nested, err := sourceworkflow.NestedDrainItemRoots(info.store, root.ID)
-			if err != nil {
-				return res, err
-			}
-			for _, item := range nested {
-				if isClosedStatus(item.Status) {
-					continue
-				}
-				n, holders, err := cancelWorkflowRoot(info.store, item.ID)
-				res.closed += n
-				if err != nil {
-					return res, err
-				}
-				res.holders = append(res.holders, holders...)
-			}
-			n, holders, err := cancelWorkflowRoot(info.store, root.ID)
+			targets = append(targets, runCancelTarget{store: info.store, root: root})
+		}
+	}
+	if len(targets) == 0 {
+		res.terminal = res.found
+		return res, nil
+	}
+
+	for _, target := range targets {
+		if strings.TrimSpace(target.root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
+			continue // marked by an earlier attempt
+		}
+		if err := target.store.SetMetadata(target.root.ID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+			return res, err
+		}
+	}
+
+	var holders []string
+	for i := range targets {
+		held, err := planRunCancel(&targets[i])
+		if err != nil {
+			return res, err
+		}
+		holders = append(holders, held...)
+	}
+	if len(holders) > 0 && interrupt != nil {
+		interrupt(holders)
+	}
+
+	for _, target := range targets {
+		for _, rootID := range target.workflows {
+			n, err := cancelWorkflowRoot(target.store, rootID)
 			res.closed += n
 			if err != nil {
 				return res, err
 			}
-			res.holders = append(res.holders, holders...)
-			res.status = RunStatusCanceled
 		}
-	}
-	if res.found && res.status == "" {
-		res.terminal = true
+		res.status = RunStatusCanceled
 	}
 	return res, nil
 }
@@ -499,22 +542,12 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 // teardown tail. A nested drain item root is canceled exactly like the run
 // root: it is a workflow root in its own right, so its own controls read
 // gc.cancel_requested off it and its own teardown tail still runs.
-//
-// It also returns the assignees of the members that were in progress when the
-// close swept them, read before the close (which erases that status). They are
-// returned only when the close succeeded, so a caller interrupts nobody over
-// work that is still open. A spared teardown step is not swept, so its holder
-// is not returned.
-func cancelWorkflowRoot(store beads.Store, rootID string) (int, []string, error) {
+func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
 	exclude, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
-	holders, err := inProgressAssignees(store, rootID, exclude)
-	if err != nil {
-		return 0, nil, err
-	}
-	n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(
+	return sourceworkflow.CloseWorkflowSubtreeAsExcept(
 		store,
 		rootID,
 		beadmeta.OutcomeCanceled,
@@ -522,20 +555,38 @@ func cancelWorkflowRoot(store beads.Store, rootID string) (int, []string, error)
 		map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
 		exclude,
 	)
-	if err != nil {
-		return n, nil, err
-	}
-	return n, holders, nil
 }
 
-// inProgressAssignees returns the assignees of the in-progress members of the
-// workflow rooted at rootID that a close sparing exclude would sweep: the same
-// member set CloseWorkflowSubtreeAsExcept closes, narrowed to claimed work.
-func inProgressAssignees(store beads.Store, rootID string, exclude func(beads.Bead) bool) ([]string, error) {
-	members, err := sourceworkflow.ListWorkflowBeads(store, rootID)
+// planRunCancel reads target's workflow tree, records the open workflows the
+// cancel closes (deepest first, the run root last), and returns the assignees
+// of the in-progress members those closes will sweep, in first-seen order and
+// possibly repeated. A nested item workflow already closed is neither closed
+// again nor searched for holders. A spared teardown step is not swept, so its
+// holder is not returned; the teardown tail is judged from the members the
+// tree walk already read (every member of a graph workflow carries its
+// gc.root_bead_id) rather than from a further subtree read, which the close
+// makes for itself, so that no read beyond the walk delays the interrupts.
+func planRunCancel(target *runCancelTarget) ([]string, error) {
+	tree, err := sourceworkflow.WorkflowTree(target.store, target.root.ID)
 	if err != nil {
 		return nil, err
 	}
+	var holders []string
+	for _, node := range tree {
+		if node.Root.ID == "" || isClosedStatus(node.Root.Status) {
+			continue
+		}
+		exclude := molecule.TeardownTailExclusionFromMembers(node.Members)
+		holders = append(holders, inProgressAssignees(node.Members, exclude)...)
+		target.workflows = append(target.workflows, node.Root.ID)
+	}
+	return holders, nil
+}
+
+// inProgressAssignees returns the assignees of the in-progress members of a
+// workflow that a close sparing exclude would sweep: the same member set
+// CloseWorkflowSubtreeAsExcept closes, narrowed to claimed work.
+func inProgressAssignees(members []beads.Bead, exclude func(beads.Bead) bool) []string {
 	var assignees []string
 	for _, member := range members {
 		if member.Status != "in_progress" || (exclude != nil && exclude(member)) {
@@ -545,13 +596,13 @@ func inProgressAssignees(store beads.Store, rootID string, exclude func(beads.Be
 			assignees = append(assignees, assignee)
 		}
 	}
-	return assignees, nil
+	return assignees
 }
 
 // interruptRunHolders interrupts the current turn of each live session among
-// holders — assignees of in-progress steps a run cancel closed — so a step
-// that was executing (a foreground tool included) stops rather than running on
-// after its run was canceled. It is the interrupt POST /session/{id}/stop
+// holders — assignees of in-progress steps of a run being canceled — so a
+// step that was executing (a foreground tool included) stops rather than
+// running on after its run was canceled. It is the interrupt POST /session/{id}/stop
 // sends (session.Manager.StopTurn); no session is killed, because a pool
 // session may go on to serve other work.
 //
@@ -561,8 +612,8 @@ func inProgressAssignees(store beads.Store, rootID string, exclude func(beads.Be
 // that is suspended or whose runtime is not running, has no turn to interrupt
 // and is skipped.
 //
-// Best-effort: the graph cancel is already durable, so a failure is logged and
-// returned for the response rather than failing the cancel. Distinct sessions
+// Best-effort: the run is already durably marked canceling, so a failure is
+// logged and returned for the response rather than failing the cancel. Distinct sessions
 // are interrupted concurrently, since a provider's interrupt can wait for the
 // session to settle. Returns the interrupted session IDs, in holder order, and
 // the failures.
