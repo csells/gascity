@@ -2983,11 +2983,30 @@ export type Run = {
     updated_at?: string;
 };
 
+export type RunCancelInterruptFailure = {
+    /**
+     * Why the interrupt failed.
+     */
+    error: string;
+    /**
+     * Session ID, or the step assignee when it could not be resolved to a session.
+     */
+    session: string;
+};
+
 export type RunCancelOutputBody = {
     /**
-     * Count of the run's beads closed by the cancel.
+     * Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
      */
     closed: number;
+    /**
+     * Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+     */
+    interrupt_failures?: Array<RunCancelInterruptFailure> | null;
+    /**
+     * IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+     */
+    interrupted?: Array<string> | null;
     /**
      * The canceled run.
      */
