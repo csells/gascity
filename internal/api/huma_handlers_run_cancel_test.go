@@ -516,3 +516,102 @@ func TestRunCancelAlreadyTerminalConflict(t *testing.T) {
 		t.Errorf("error = %q, want already-terminal conflict", err.Error())
 	}
 }
+
+// TestRunCancelReachesNestedDrainItemRoots guards the nested-drain cancel gap: a
+// drain item workflow is its own root, linked to the run only through its
+// gc.drain_control_id, and its steps carry the item root's id rather than the
+// run's. A cancel that winds down only gc.root_bead_id == run left those item
+// roots and their steps open and claimable after the run was reported canceled.
+// The cancel must reach every level of nesting, keep the teardown-tail
+// exemption at each level, and leave completed work untouched.
+func TestRunCancelReachesNestedDrainItemRoots(t *testing.T) {
+	fs := newFakeState(t)
+	store := fs.stores["myrig"]
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return created
+	}
+	workflowRoot := func(title, drainControlID string) beads.Bead {
+		meta := map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"}
+		if drainControlID != "" {
+			meta["gc.drain_control_id"] = drainControlID
+		}
+		return create(beads.Bead{Title: title, Type: "molecule", Metadata: meta})
+	}
+	member := func(title, rootID string, extra map[string]string) beads.Bead {
+		meta := map[string]string{"gc.root_bead_id": rootID}
+		for k, v := range extra {
+			meta[k] = v
+		}
+		return create(beads.Bead{Title: title, Type: "task", Metadata: meta})
+	}
+
+	run := workflowRoot("implement run", "")
+	drain := member("drain work", run.ID, map[string]string{"gc.kind": "drain"})
+	item := workflowRoot("do-work item", drain.ID)
+	itemStep := member("item step", item.ID, nil)
+	itemDone := member("item done step", item.ID, nil)
+	if _, err := store.CloseAll([]string{itemDone.ID}, map[string]string{"gc.outcome": "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	itemTeardown := member("item cleanup", item.ID, map[string]string{"gc.scope_role": "teardown", "gc.step_id": "cleanup"})
+	nestedDrain := member("nested drain", item.ID, map[string]string{"gc.kind": "drain"})
+	grandchild := workflowRoot("nested item", nestedDrain.ID)
+	grandchildStep := member("nested item step", grandchild.ID, nil)
+	s := &Server{state: fs}
+
+	out, err := s.humaHandleRunCancel(context.Background(), &RunCancelInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     run.ID,
+	})
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
+	}
+
+	for _, id := range []string{item.ID, grandchild.ID} {
+		root, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Status != "closed" || root.Metadata["gc.outcome"] != "canceled" {
+			t.Errorf("nested item root %s = status %q outcome %q, want closed canceled", id, root.Status, root.Metadata["gc.outcome"])
+		}
+		if root.Metadata["gc.cancel_requested"] != "true" {
+			t.Errorf("nested item root %s gc.cancel_requested = %q, want true so its controls stop as canceled", id, root.Metadata["gc.cancel_requested"])
+		}
+	}
+	for _, id := range []string{itemStep.ID, nestedDrain.ID, grandchildStep.ID} {
+		step, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if step.Status != "closed" || step.Metadata["gc.outcome"] != "canceled" {
+			t.Errorf("nested step %s = status %q outcome %q, want closed canceled", id, step.Status, step.Metadata["gc.outcome"])
+		}
+	}
+	done, err := store.Get(itemDone.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Metadata["gc.outcome"] != "pass" {
+		t.Errorf("completed nested step outcome = %q, want it left as pass", done.Metadata["gc.outcome"])
+	}
+	teardown, err := store.Get(itemTeardown.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if teardown.Status == "closed" {
+		t.Error("nested teardown step was force-closed by run cancel; it must stay open so it can still execute")
+	}
+	// run + drain + item + item step + nested drain + grandchild + its step.
+	if out.Body.Closed != 7 {
+		t.Errorf("closed = %d, want 7 (both workflow levels below the run, minus completed and teardown work)", out.Body.Closed)
+	}
+}

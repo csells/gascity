@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -334,6 +335,10 @@ type hookClaimOps struct {
 	// EmitWorkStartedUnrecorded publishes work.started_unrecorded when a
 	// claim is delivered without its work_started record. Best-effort.
 	EmitWorkStartedUnrecorded func(sessionID, template, beadID string, cause error)
+	// WorkflowStore opens the store a candidate's workflow ancestry is read
+	// from, and a candidate stranded under a stopped workflow is closed in,
+	// writing as actor (see hookClaimWorkflowStop).
+	WorkflowStore hookWorkflowStoreFunc
 }
 
 type (
@@ -364,6 +369,9 @@ type (
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
+	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
+	// that holds beadID's workflow, writing as actor.
+	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
 )
 
 type hookClaimJSONResult struct {
@@ -527,7 +535,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
 		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
-		if verdict != hookAdoptionRefused {
+		// Holding a bead is no reason to resume it once its workflow stopped:
+		// the step a worker took before its root failed is exactly the one a
+		// re-poll would otherwise hand straight back. A stopped bead is closed
+		// and not adopted, and the claim tiers below look for live work.
+		if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
 			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
@@ -623,6 +635,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.RestampAdopted == nil {
 		ops.RestampAdopted = hookClaimRestampWithBdStore
+	}
+	if ops.WorkflowStore == nil {
+		ops.WorkflowStore = hookWorkflowStoreWithBdStore
 	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
@@ -818,6 +833,9 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
+		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
+			continue
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
@@ -888,6 +906,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		claimed = restamped
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		// The race window: the workflow can stop between the pre-claim check
+		// and the CAS landing. Re-check the claim just won rather than hand the
+		// worker a step under a root that settled in between.
+		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
@@ -979,6 +1003,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// next tick (NDI).
 			break
 		}
+		// Neither the work query nor bd ready knows a workflow stopped: a step's
+		// only link to its root is a non-blocking tracks edge, so a step under a
+		// failed or canceled root stays ready. This gate is what keeps it from
+		// minting a new obligation.
+		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
 			if ok {
@@ -1028,6 +1059,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			return hookClaimResult{terminal: true, code: 1}
 		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		// Re-check across the CAS, as the ready tier does.
+		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
@@ -1111,6 +1146,74 @@ func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, n
 		strings.TrimSpace(candidate.Assignee) != "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
+}
+
+// hookClaimWorkflowLinked reports whether a candidate has workflow ancestry for
+// the stop gate to read: a root other than itself, or a drain-control link (a
+// drain item root handed out whole). Plain work and standalone roots skip the
+// gate without a store read.
+func hookClaimWorkflowLinked(candidate beads.Bead) bool {
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	return (rootID != "" && rootID != candidate.ID) ||
+		strings.TrimSpace(candidate.Metadata[beadmeta.DrainControlIDMetadataKey]) != ""
+}
+
+// hookClaimWorkflowStop is the claim-time stop gate. It reports whether
+// candidate belongs to a workflow that already stopped — some root on its
+// ancestor chain, nested drain levels included, has settled or been canceled
+// (molecule.WorkflowStopReason, which exempts the teardown tail) — and so must
+// not be handed to a worker.
+//
+// A stopped candidate is also closed, as gc.outcome=canceled under a
+// cancellation and skipped otherwise, the same residue outcomes the
+// dispatcher's control gate and the finalizer's sweep stamp. Closing it here
+// rather than merely skipping it is what makes the stop durable: an open step
+// under a dead root is otherwise offered to every poll of every worker until
+// one of them takes it. actor is the identity the close writes as — the
+// assignee the bead carries, so bd's assignee fence admits it.
+//
+// A failed read of the ancestry fails open, the same trade the drain-pending
+// probe makes: one store hiccup must not idle every seat, and the claim CAS
+// that follows runs against the same store. A failed close still withholds the
+// bead; it stays visible to the next poll, which re-runs this gate.
+func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
+		return false
+	}
+	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	stop, err := molecule.WorkflowStopReason(store, candidate)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
+		return false
+	}
+	if !stop.Stopped() {
+		return false
+	}
+	reason := fmt.Sprintf("workflow root %s settled before this step started", stop.RootID)
+	if stop.Canceled {
+		reason = fmt.Sprintf("workflow root %s was canceled before this step started", stop.RootID)
+	}
+	if _, err := store.CloseAll([]string{candidate.ID}, map[string]string{
+		beadmeta.OutcomeMetadataKey: stop.Outcome(),
+		"close_reason":              reason,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: not serving %s: %s; closing it failed: %v\n", candidate.ID, reason, err) //nolint:errcheck
+		return true
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: closed %s as %s: %s\n", candidate.ID, stop.Outcome(), reason) //nolint:errcheck
+	return true
+}
+
+// hookClaimStoppedAdoption runs the stop gate over a bead offered for
+// adoption, writing as the canonical holder when the readback named one.
+func hookClaimStoppedAdoption(bead beads.Bead, canonicalAssignee string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	actor := strings.TrimSpace(canonicalAssignee)
+	if actor == "" {
+		actor = strings.TrimSpace(bead.Assignee)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	return hookClaimWorkflowStop(ctx, bead, actor, opts, ops, dir, stderr)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -1830,6 +1933,32 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		return nil, err
 	}
 	pinAssignee := continuationPinAssignee(opts)
+	// A pin is a claim made on the sibling's behalf, so it answers to the same
+	// stop gate. The served bead passed that gate, but a teardown step passes it
+	// under a stopped root, and its group siblings are ordinary work under that
+	// same root. Siblings share the bead's root, so one ancestry read, made only
+	// once there is a sibling to pin, answers for all of them; a failed read
+	// fails open like the gate itself.
+	var workflowStore beads.Store
+	var ancestorStop molecule.WorkflowStop
+	ancestorRead := false
+	stoppedSibling := func(sibling beads.Bead) bool {
+		if ops.WorkflowStore == nil {
+			return false
+		}
+		if !ancestorRead {
+			ancestorRead = true
+			workflowStore = ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")
+			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
+				ancestorStop = stop
+			}
+		}
+		if !ancestorStop.Stopped() {
+			return false
+		}
+		teardown, err := molecule.IsTeardownTailMember(workflowStore, sibling)
+		return err != nil || !teardown
+	}
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
 		if strings.TrimSpace(sibling.ID) == "" ||
@@ -1842,7 +1971,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// sibling's required next actor is, by construction, not this
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
-			beadmeta.HasDispatchHold(sibling.Labels) {
+			beadmeta.HasDispatchHold(sibling.Labels) ||
+			stoppedSibling(sibling) {
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
@@ -2533,6 +2663,10 @@ func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
+}
+
+func hookWorkflowStoreWithBdStore(ctx context.Context, dir string, env []string, _, actor string) beads.Store {
+	return hookClaimBdStoreContext(ctx, dir, env, actor)
 }
 
 func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
