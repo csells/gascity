@@ -177,3 +177,83 @@ func TestRunCancelBdCallsDoNotGrowPerMember(t *testing.T) {
 		t.Errorf("post-close reads grew from %d to %d with the run; the close refresh reads per bead", small.refresh, large.refresh)
 	}
 }
+
+// TestRunCancelCloseOrderHonorsBlockersWhenBdRefusesTheBatch pins close
+// ordering through the production stack on a bd backend that refuses the
+// batched dep read (the bd/Postgres backend answers it with `operation
+// "IssueRelations" not supported`, ga-7i7ts) but answers a one-id read. The
+// refusal must send closeorder to its per-anchor reads, not read as "no edges":
+// each step here is blocked by the NEXT one created, so an order that lost the
+// edges (deepest first, then by id) closes every blocked step before its
+// blocker.
+func TestRunCancelCloseOrderHonorsBlockersWhenBdRefusesTheBatch(t *testing.T) {
+	fake := beadstest.NewFakeBd()
+	seed := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		seeded, err := fake.Seed(b)
+		if err != nil {
+			t.Fatalf("seed %q: %v", b.Title, err)
+		}
+		return seeded
+	}
+	root := seed(beads.Bead{Title: "run", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
+	var steps []beads.Bead
+	for i := range 4 {
+		steps = append(steps, seed(beads.Bead{Title: fmt.Sprintf("step %d", i), ParentID: root.ID, Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		}}))
+	}
+	blockedBy := map[string]string{}
+	for i := 0; i+1 < len(steps); i++ {
+		if err := fake.SeedDep(steps[i].ID, steps[i+1].ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		blockedBy[steps[i].ID] = steps[i+1].ID
+	}
+
+	var closeOrder []string
+	var refusedBatches int
+	runner := func(dir, name string, args ...string) ([]byte, error) {
+		if args[0] == "dep" && args[1] == "list" && !slices.Contains(args, "--direction=up") {
+			ids := 0
+			for _, arg := range args[2:] {
+				if !strings.HasPrefix(arg, "-") {
+					ids++
+				}
+			}
+			if ids > 1 {
+				refusedBatches++
+				return nil, fmt.Errorf(`exit status 1: Error: operation "IssueRelations" not supported by the postgres backend`)
+			}
+		}
+		if args[0] == "close" {
+			for _, arg := range args[1:] {
+				if strings.HasPrefix(arg, "gc-") {
+					closeOrder = append(closeOrder, arg)
+				}
+			}
+		}
+		return fake.Run(dir, name, args...)
+	}
+	store := wrapWithCachingStore(context.Background(),
+		wrapStoreWithBeadPolicies(beads.NewBdStore("/fake-bd", runner), &config.City{}), nil, false)
+
+	if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(store, root.ID, beadmeta.OutcomeCanceled,
+		"run canceled via POST /runs/{id}/cancel", map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, nil); err != nil {
+		t.Fatalf("CloseWorkflowSubtreeAsExcept: %v", err)
+	}
+	if refusedBatches == 0 {
+		t.Fatal("the close order never asked for the batch, so this test does not exercise the refusal")
+	}
+	position := make(map[string]int, len(closeOrder))
+	for i, id := range closeOrder {
+		if _, seen := position[id]; !seen {
+			position[id] = i
+		}
+	}
+	for blocked, blocker := range blockedBy {
+		if position[blocker] > position[blocked] {
+			t.Errorf("close order %v closes %s before its blocker %s; the refused batch was read as no edges", closeOrder, blocked, blocker)
+		}
+	}
+}

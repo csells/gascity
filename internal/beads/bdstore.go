@@ -3747,9 +3747,30 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
+//
+// One id is read with DepList and returned as that anchor's entry: a one-id
+// `bd dep list <id> --json` prints the depended-on beads' rows, not the
+// dependency records a multi-id call prints, so parsing it as records would
+// key every edge under "" and report the anchor as edge-free.
+//
+// A backend that does not implement the read at all — the bd/Postgres backend
+// answers `operation "IssueRelations" not supported by the postgres backend`
+// (measured on maintainer-city, ga-7i7ts) — is reported with
+// ErrDepListBatchUnsupported and no map, never as an empty map. An empty map
+// reads to every caller as "these anchors have no edges": close ordering would
+// drop its blockers and the scope-skip walk would see no dependencies. The
+// sentinel sends each caller to its per-anchor reads, exactly as a wrapper
+// without the batch does.
 func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if len(ids) == 1 {
+		deps, err := s.DepList(ids[0], "down")
+		if err != nil {
+			return nil, err
+		}
+		return map[string][]Dep{ids[0]: deps}, nil
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
@@ -3759,14 +3780,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 			return make(map[string][]Dep), nil
 		}
 		if isBdOperationUnsupported(err) {
-			// Some backends don't implement this at all — e.g. the Postgres
-			// backend answers `operation "IssueRelations" not supported by
-			// the postgres backend` (measured on maintainer-city, ga-7i7ts).
-			// Callers use this as a post-filter over an already-correct bd
-			// answer, so "no evidence of blocking" is the safe degrade:
-			// today's (pre-gc.work_outcome-filter) behavior, not a hard
-			// failure of the read that got them here.
-			return make(map[string][]Dep), nil
+			return nil, fmt.Errorf("batch dep list: %w: %w", ErrDepListBatchUnsupported, err)
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)
 	}

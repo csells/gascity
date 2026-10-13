@@ -91,6 +91,34 @@ func TestBdStoreBatchedDispatchReadsMatchPerCallReads(t *testing.T) {
 		t.Fatalf("ChildrenOfAny(WithBothTiers) = %v, want the TierBoth List union %v (4 children, the ephemeral one included)", gotBoth, bothTiers)
 	}
 
+	// DepListBatch answers each anchor as DepList does, for one id (whose
+	// `bd dep list <id> --json` prints rows, not records) and for several.
+	blocked := mk(beads.Bead{Title: "blocked", Type: "task", ParentID: p1.ID})
+	if err := store.DepAdd(blocked.ID, p2.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	single, err := store.DepList(blocked.ID, "down")
+	if err != nil || len(single) != 2 {
+		t.Fatalf("DepList(%s) = (%v, %v), want its parent-child and blocks edges", blocked.ID, single, err)
+	}
+	depKeys := func(deps []beads.Dep) []string {
+		var out []string
+		for _, d := range deps {
+			out = append(out, d.IssueID+">"+d.DependsOnID+":"+d.Type)
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, ids := range [][]string{{blocked.ID}, {blocked.ID, p1.ID}} {
+		batch, err := store.DepListBatch(ids)
+		if err != nil {
+			t.Fatalf("DepListBatch(%v): %v", ids, err)
+		}
+		if got, want := depKeys(batch[blocked.ID]), depKeys(single); !slices.Equal(got, want) {
+			t.Fatalf("DepListBatch(%v)[%s] = %v, want DepList's %v (whole answer %v)", ids, blocked.ID, got, want, batch)
+		}
+	}
+
 	leaf := mk(beads.Bead{Title: "leaf control", Type: "task", Metadata: map[string]string{"keep": "v"}})
 	status := "closed"
 	row, err := store.UpdateReporting(leaf.ID, beads.UpdateOpts{Status: &status, Metadata: map[string]string{"gc.outcome": "pass"}})
