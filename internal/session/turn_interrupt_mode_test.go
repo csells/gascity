@@ -90,6 +90,9 @@ func checkInterruptNow(t *testing.T, fam turnInterruptFamily, mgr *Manager, sp *
 // were recorded from the code before the change. (A delivery's two cached
 // IsRunning reads after its fresh read went with mc-ir8qp: whether the
 // runtime runs is the fresh read's.)
+// A Codex stop also ends with StopBackgroundWork, which runtime.Fake
+// implements: the runtime closes the background terminals the interrupted
+// turn left running.
 func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
@@ -97,11 +100,11 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle ClearInput IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"codex": {
-			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary",
+			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"wrapped-codex": {
-			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary",
+			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"kimi": {
@@ -237,6 +240,8 @@ func TestKeystrokeTurnInterruptBehindCompositesKeepsProviderSequences(t *testing
 // A runtime whose turns are protocol-driven drops keystrokes, so every family
 // must be interrupted through Interrupt and no keys may be sent: a dropped
 // Escape would leave the turn running while the caller is told it stopped.
+// A Codex stop still asks the runtime to stop the turn's background work; the
+// runtime decides how, and one that cannot reports ErrInteractionUnsupported.
 func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
@@ -244,11 +249,11 @@ func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"codex": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"wrapped-codex": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForInterruptBoundary",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForInterruptBoundary StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"kimi": {

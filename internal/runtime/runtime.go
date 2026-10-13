@@ -899,6 +899,23 @@ func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
 	}
 }
 
+// BackgroundWorkStopper is an optional extension for runtimes that can stop
+// work a provider keeps running after its turn was interrupted. A session's
+// explicit stop (session.Manager.StopTurn) calls it once the interrupt
+// boundary is reached; an interrupt that delivers a replacement message does
+// not, so a replacement turn leaves earlier work alone.
+//
+// Codex CLI runs a turn's commands in background terminals that outlive the
+// interrupted turn. tmux stops them with Codex's /stop, which closes ALL of
+// the session's background terminals, including ones earlier turns started:
+// stopping a session stops its work. StopBackgroundWork returns
+// [ErrInteractionUnsupported] for sessions it has no such work to stop for.
+// Work it could not stop is logged rather than returned, because the turn is
+// already stopped; only the caller's context ending is an error.
+type BackgroundWorkStopper interface {
+	StopBackgroundWork(ctx context.Context, name string) error
+}
+
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
 // agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
 // runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only

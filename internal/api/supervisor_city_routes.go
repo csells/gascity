@@ -396,7 +396,11 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
-	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable),
+		describes("Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. "+
+			"For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. "+
+			"An interrupt_now submit interrupts the turn the same way but leaves background terminals running. "+
+			"A runtime that can interrupt the turn neither by keys nor by protocol gets nothing sent and answers 501 turn_interrupt_unsupported."))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. "+
