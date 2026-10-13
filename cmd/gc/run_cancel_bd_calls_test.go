@@ -116,8 +116,9 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 	store := wrapWithCachingStore(context.Background(),
 		wrapStoreWithBeadPolicies(beads.NewBdStore("/fake-bd", runner), &config.City{}), nil, false)
 
-	// internal/api cancelRun for one open root: nested drain item workflows
-	// first, then the run root, each with its teardown tail spared.
+	// internal/api cancelRun for one open root: mark the run canceling, read
+	// its workflow tree, then close nested drain item workflows first and the
+	// run root last, each with its teardown tail spared.
 	cancelRoot := func(rootID string) int {
 		t.Helper()
 		exclude, err := molecule.TeardownTailExclusion(store, rootID)
@@ -132,14 +133,20 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 		}
 		return n
 	}
-	nested, err := sourceworkflow.NestedDrainItemRoots(store, run.ID)
+	if err := store.SetMetadata(run.ID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+		t.Fatalf("mark run canceling: %v", err)
+	}
+	tree, err := sourceworkflow.WorkflowTree(store, run.ID)
 	if err != nil {
-		t.Fatalf("NestedDrainItemRoots: %v", err)
+		t.Fatalf("WorkflowTree: %v", err)
 	}
-	if len(nested) != 1 || nested[0].ID != item.ID {
-		t.Fatalf("nested drain item roots = %v, want [%s]", nested, item.ID)
+	if len(tree) != 2 || tree[0].Root.ID != item.ID || tree[1].Root.ID != run.ID {
+		t.Fatalf("workflow tree roots = %v, want [%s %s]", tree, item.ID, run.ID)
 	}
-	closed := cancelRoot(item.ID) + cancelRoot(run.ID)
+	closed := 0
+	for _, node := range tree {
+		closed += cancelRoot(node.Root.ID)
+	}
 
 	// root + steps + drain + wisp step per run, root + steps per item.
 	if want := 2*(members+1) + 2; closed != want {
