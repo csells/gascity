@@ -811,6 +811,10 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
 	// wrapped before the class route, whose binding writes announce themselves.
 	ops := classRoutedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), route)
+	// A kept claim is announced before its result is written; this announces
+	// whatever is left on the way out (a release, a reclaim, a claim that
+	// stopped on an error).
+	defer ops.announceBeadEvents()
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 

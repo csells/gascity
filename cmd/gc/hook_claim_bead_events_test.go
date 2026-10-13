@@ -37,6 +37,8 @@ type hookClaimEventsCity struct {
 	// store and before the hook reads it back: the window in which the
 	// supervisor can read the claimed row first.
 	afterClaimWrite func()
+	// onBd, when set, sees every bd invocation before it is answered.
+	onBd func(args []string)
 
 	mu     sync.Mutex
 	bdArgs [][]string
@@ -104,6 +106,9 @@ func (c *hookClaimEventsCity) fakeBd(t *testing.T, actor string, args []string) 
 	c.mu.Lock()
 	c.bdArgs = append(c.bdArgs, append([]string(nil), args...))
 	c.mu.Unlock()
+	if c.onBd != nil {
+		c.onBd(args)
+	}
 	show := func(id string) ([]byte, error) {
 		b, err := c.mem.Get(id)
 		if err != nil {
@@ -127,6 +132,22 @@ func (c *hookClaimEventsCity) fakeBd(t *testing.T, actor string, args []string) 
 		}
 		if c.afterClaimWrite != nil {
 			c.afterClaimWrite()
+		}
+		return show(id)
+	case len(args) >= 7 && args[0] == "update" && args[2] == "--if-assignee" && args[4] == "--if-status":
+		// The conditional release verb: update <id> --if-assignee A --if-status S
+		// --status open --assignee "".
+		id := args[1]
+		b, err := c.mem.Get(id)
+		if err != nil {
+			return nil, err
+		}
+		if b.Assignee != args[3] || b.Status != args[5] {
+			return []byte("precondition failed"), errors.New("exit status 13")
+		}
+		status, assignee := "open", ""
+		if err := c.mem.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			return nil, err
 		}
 		return show(id)
 	case len(args) >= 3 && args[0] == "update" && args[1] == "--json":
@@ -242,6 +263,28 @@ func TestHookClaimAnnouncesClaimToRunProjection(t *testing.T) {
 	}
 	if got.Metadata[beadmeta.RootBeadIDMetadataKey] != city.rootID {
 		t.Fatalf("projected step lost its run membership: metadata=%v", got.Metadata)
+	}
+	// The identity stamp (gc.claimed_at) is derived onto the CAS readback
+	// rather than read back, and must still match what the store holds.
+	stored, err := city.mem.Get(city.stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Metadata, stored.Metadata) {
+		t.Fatalf("projected metadata = %v, want the stored row's %v", got.Metadata, stored.Metadata)
+	}
+	// The announcement reads nothing it can derive: after the hook's last
+	// write (the stamp), the only bd call is the one edge confirmation.
+	var afterWrites []string
+	for _, args := range city.bdArgs {
+		if args[0] == "update" {
+			afterWrites = nil
+			continue
+		}
+		afterWrites = append(afterWrites, strings.Join(args, " "))
+	}
+	if len(afterWrites) != 1 || !strings.HasPrefix(afterWrites[0], "dep list ") {
+		t.Fatalf("bd calls after the hook's last write = %q, want only one edge confirmation", afterWrites)
 	}
 
 	// The announcement is the supervisor's own bead.updated shape: a canonical
@@ -476,6 +519,12 @@ func TestHookClaimWorkStoreWritesAnnounceOnlyWhatLanded(t *testing.T) {
 			if err := tc.run(city, ops); err != nil {
 				t.Fatal(err)
 			}
+			// The write only notes itself; nothing reaches the log (or reads
+			// the store) until the announcement point.
+			if n := len(city.stepUpdates(t)); n != before {
+				t.Fatalf("the write announced itself (%d new bead.updated) before the announcement point", n-before)
+			}
+			ops.announceBeadEvents()
 
 			announced := len(city.stepUpdates(t)) > before
 			if announced != tc.wantAnnounce {
@@ -521,5 +570,102 @@ func TestHookClaimSucceedsWhenTheEventLogCannotBeWritten(t *testing.T) {
 	}
 	if len(warned) == 0 {
 		t.Fatal("a claim whose announcement could not be appended reported nothing")
+	}
+}
+
+// claimWithClock runs the claim tier through the announcing ops on a fake clock:
+// the claim CAS lands casAge into the invocation, and every bd read made after
+// the CAS's own readback costs two seconds, as on a loaded store.
+func claimWithClock(t *testing.T, city *hookClaimEventsCity, window, casAge time.Duration) (hookClaimOps, int, string, string) {
+	t.Helper()
+	step, err := city.mem.Get(city.stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal([]beads.Bead{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invokedAt := time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	now := invokedAt
+	clock := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	claimed, readbackSeen := false, false
+	city.onBd = func(args []string) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		switch {
+		case len(args) >= 3 && args[0] == "update" && args[2] == "--claim":
+			now = invokedAt.Add(casAge)
+			claimed = true
+		case claimed && args[0] == "show" && !readbackSeen:
+			readbackSeen = true // the CAS's own canonical readback
+		case claimed && (args[0] == "show" || args[0] == "dep"):
+			now = now.Add(2 * time.Second)
+		}
+	}
+
+	env := []string{"BEADS_DIR=" + filepath.Join(city.dir, ".beads")}
+	ops := withHookClaimBeadEvents(hookClaimOps{Now: clock, InvokedAt: invokedAt, ClaimWindow: window}, city.dir)
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("printf '%s' '"+string(out)+"'", city.dir, env, []hookStore{{dir: city.dir, env: env}},
+		hookClaimOptions{
+			Assignee:           "worker-1",
+			IdentityCandidates: []string{"worker-1"},
+			RouteTargets:       []string{"worker"},
+			Env:                env,
+			JSON:               true,
+		}, ops, shellWorkQueryWithEnv, func(string, error) {}, &stdout, &stderr)
+	return ops, code, stdout.String(), stderr.String()
+}
+
+// The announcement must never decide whether a claim is kept. A claim CAS that
+// lands inside the claim window plus its reserved mutation budget is delivered;
+// the store reads the announcement makes come after that decision, so a slow
+// store spending them cannot turn the claim into a straddle unwind.
+func TestHookClaimAnnouncementReadsDoNotSpendTheLandingWindow(t *testing.T) {
+	city := newHookClaimEventsCity(t)
+	const window = time.Minute
+	_, code, stdout, stderr := claimWithClock(t, city, window, window+hookClaimMutationTimeout-time.Second)
+
+	if code != 0 || !strings.Contains(stdout, city.stepID) {
+		t.Fatalf("claim = %d, stdout=%q, want the claim delivered; stderr=%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "claim window") {
+		t.Fatalf("a claim that landed inside window + reserve was unwound: %s", stderr)
+	}
+	got := city.projectedStep(t)
+	if got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("projection shows status=%q assignee=%q, want the kept claim announced", got.Status, got.Assignee)
+	}
+}
+
+// A claim that lands too late is unwound, and what reaches the run views is
+// the release, never the claim it gave back.
+func TestHookClaimUnwoundClaimAnnouncesOnlyItsRelease(t *testing.T) {
+	city := newHookClaimEventsCity(t)
+	const window = time.Minute
+	ops, code, _, stderr := claimWithClock(t, city, window, window+hookClaimMutationTimeout+time.Second)
+	if code != 1 || !strings.Contains(stderr, "claim window") {
+		t.Fatalf("claim = %d, stderr=%s, want the straddle unwind", code, stderr)
+	}
+	// claimHookWork announces what is left on its way out.
+	ops.announceBeadEvents()
+
+	for _, e := range city.stepUpdates(t) {
+		if b, ok := beads.DecodeBeadEventPayload(e.Payload); ok && b.Status == "in_progress" {
+			t.Fatalf("the unwound claim was announced: %s", e.Payload)
+		}
+	}
+	got := city.projectedStep(t)
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("projection shows status=%q assignee=%q, want the released step", got.Status, got.Assignee)
+	}
+	if len(city.stepUpdates(t)) == 0 {
+		t.Fatal("the release was not announced")
 	}
 }
