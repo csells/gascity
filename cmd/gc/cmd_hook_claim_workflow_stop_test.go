@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -361,5 +362,112 @@ func TestHookClaimDoesNotPreassignSiblingsUnderStoppedWorkflow(t *testing.T) {
 	}
 	if pinned := f.get(sibling.ID); pinned.Assignee != "" {
 		t.Fatalf("sibling %s pinned to %q under a failed root", sibling.ID, pinned.Assignee)
+	}
+}
+
+// slowWorkflowStore charges every ancestry read the stop gate makes against the
+// invocation clock, the way a bd store at ~1s per call does.
+type slowWorkflowStore struct {
+	beads.Store
+	charge func()
+}
+
+func (s slowWorkflowStore) Get(id string) (beads.Bead, error) {
+	s.charge()
+	return s.Store.Get(id)
+}
+
+// TestHookClaimWorkflowRecheckDoesNotSpendTheLandingWindow pins what the
+// straddle fence measures: when the claim CAS returned, not how long the reads
+// after it took. A CAS that lands inside the claim window plus its reserved
+// mutation budget is a kept claim even when the post-CAS workflow re-check, on a
+// slow store, carries the invocation past that line; one that lands past it is
+// still unwound.
+func TestHookClaimWorkflowRecheckDoesNotSpendTheLandingWindow(t *testing.T) {
+	const window = time.Minute
+	for _, tier := range []struct {
+		name     string
+		assignee string
+	}{
+		{name: "routed"},
+		{name: "ready assignment", assignee: "worker-1"},
+	} {
+		for _, tc := range []struct {
+			name    string
+			landing time.Duration // invocation age at which the claim CAS returns
+			kept    bool
+		}{
+			{name: "landed inside reserve", landing: window + hookClaimMutationTimeout - time.Second, kept: true},
+			{name: "landed past reserve", landing: window + hookClaimMutationTimeout + time.Second},
+		} {
+			t.Run(tier.name+"/"+tc.name, func(t *testing.T) {
+				f := newHookWorkflowStopFixture(t)
+				// A live nested chain, so the re-check walks several ancestry reads.
+				run := f.root("implement", "")
+				drain := f.create(beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{
+					"gc.root_bead_id": run.ID,
+					"gc.kind":         "drain",
+				}})
+				item := f.root("do-work", drain.ID)
+				step := f.step("implement", item.ID, nil)
+				if tier.assignee != "" {
+					assignee := tier.assignee
+					if err := f.store.Update(step.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.served = []string{step.ID}
+
+				invokedAt := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+				clock := invokedAt
+				landed := false
+				ops := f.ops()
+				ops.Now = func() time.Time { return clock }
+				ops.InvokedAt = invokedAt
+				ops.ClaimWindow = window
+				baseClaim := ops.Claim
+				ops.Claim = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
+					claimed, ok, err := baseClaim(ctx, dir, env, id, assignee)
+					clock = invokedAt.Add(tc.landing)
+					landed = true
+					return claimed, ok, err
+				}
+				ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store {
+					return slowWorkflowStore{Store: f.store, charge: func() {
+						if landed {
+							clock = clock.Add(5 * time.Second)
+						}
+					}}
+				}
+
+				var stdout, stderr bytes.Buffer
+				code := doHookClaim("query", t.TempDir(), hookClaimOptions{
+					Assignee:           "worker-1",
+					IdentityCandidates: []string{"worker-1"},
+					RouteTargets:       []string{"worker"},
+					JSON:               true,
+				}, ops, &stdout, &stderr)
+
+				got := f.get(step.ID)
+				if tc.kept {
+					if age := clock.Sub(invokedAt); age <= window+hookClaimMutationTimeout {
+						t.Fatalf("invocation age after the re-check = %s, want it carried past window + reserve", age)
+					}
+					if code != 0 || !strings.Contains(stdout.String(), step.ID) || strings.Contains(stderr.String(), "claim window") {
+						t.Fatalf("claim = %d, stdout=%q, want the claim that landed inside window + reserve delivered; stderr=%s", code, stdout.String(), stderr.String())
+					}
+					if got.Status != "in_progress" || got.Assignee != "worker-1" {
+						t.Fatalf("step = status %q assignee %q, want the kept claim in_progress worker-1", got.Status, got.Assignee)
+					}
+					return
+				}
+				if code != 1 || !strings.Contains(stderr.String(), "claim window") {
+					t.Fatalf("claim = %d, stderr=%s, want the straddle unwind", code, stderr.String())
+				}
+				if got.Status != "open" || got.Assignee != "" {
+					t.Fatalf("step = status %q assignee %q, want the straddling claim released", got.Status, got.Assignee)
+				}
+			})
+		}
 	}
 }
