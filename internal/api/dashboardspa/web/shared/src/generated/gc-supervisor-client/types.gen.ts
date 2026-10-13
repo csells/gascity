@@ -2732,7 +2732,7 @@ export type RequestFailedPayload = {
      */
     request_id: string;
     /**
-     * Session the request had already created or targeted before it failed. Present on a session.create failure whose session exists, so the client can inspect or clean it up instead of retrying into a duplicate.
+     * Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
      */
     session_id?: string;
 };
