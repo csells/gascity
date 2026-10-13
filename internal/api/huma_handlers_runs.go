@@ -301,11 +301,13 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 
 	// Derive the run's canonical lifecycle status exactly as laneToRun/deriveRunStatus
 	// do (root-terminality wins over lingering members), then clamp each step through
-	// it: a completed run must not report a step as eternally active when its close
-	// event was lost. A step that executes after the root settles (the workflow
-	// finalizer, the teardown tail) is not clamped: it has not closed yet, and
-	// presenting it skipped would be contradicted by its own close. A non-terminal
-	// run yields an inactive clamp (raw statuses stand).
+	// it: a terminal run must not report a step as eternally active. A clamped
+	// step reads the status dispatch closes it with (canceled under a canceled
+	// run, skipped otherwise), so it never flips between terminal statuses. A step
+	// that executes after the root settles (the workflow finalizer, the teardown
+	// tail) is not clamped: it has not closed yet, and presenting it skipped would
+	// be contradicted by its own close. A non-terminal run yields an inactive clamp
+	// (raw statuses stand).
 	byID := beadsByID(fold.beads)
 	root, rootFound := byID[input.RunID]
 	var rootPtr *beads.Bead

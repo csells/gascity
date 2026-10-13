@@ -60,7 +60,7 @@ func TestRunStepClampExemptsOnlyPostTerminalMembers(t *testing.T) {
 		{"r.td", "active", "active"},
 		{"r.td-attempt", "pending", "pending"},
 		{"r.step", "pending", "skipped"},
-		{"r.active", "active", "canceled"},
+		{"r.active", "active", "skipped"},
 		{"r.fin", "completed", "completed"},
 	} {
 		if got := clamp.Apply(tc.id, tc.status); got != tc.want {

@@ -28,12 +28,22 @@ func isTerminalRunNodeStatus(status string) bool {
 
 // terminalRootClamp captures whether a run's terminal root forces a presentation
 // clamp on its steps. A terminal root cannot have running steps: once the root
-// folds to a terminal status, a step still presenting as non-terminal lost its
-// own close event (a worker-side close that never emitted, or a reaper that
-// deleted the step bead before it did), so the projection presents it as finished
-// rather than eternally "Running". The clamp is presentation-only — the folded
-// bead data is never mutated, so a late-arriving close event re-derives the real
-// status on the next build.
+// folds to a terminal status, a step still presenting as non-terminal is either
+// about to be closed by dispatch or lost its own close event (a worker-side close
+// that never emitted, or a reaper that deleted the step bead before it did), so
+// the projection presents it as finished rather than eternally "Running". The
+// clamp is presentation-only — the folded bead data is never mutated, so a
+// late-arriving close event re-derives the real status on the next build.
+//
+// The clamped status is the one dispatch durably writes when it closes such a
+// step, so a step never reads one terminal status and then another. A root
+// settled by the workflow finalizer (pass or fail) leaves its open members to
+// the finalizer's sweep, which closes each gc.outcome=skipped whether or not it
+// started (dispatch.processWorkflowFinalize); a root closed skipped
+// (sourceworkflow.CloseWorkflowSubtree) closes its members skipped too. A run
+// canceled via POST /runs/{id}/cancel closes its open members
+// gc.outcome=canceled, started or not, and a finalizer settling a canceled
+// workflow sweeps them canceled.
 //
 // The exception is a member that executes after the root settles by contract:
 // the workflow finalizer closes the root before it closes itself, and the
@@ -44,10 +54,10 @@ func isTerminalRunNodeStatus(status string) bool {
 // that with its real outcome, so it keeps its own status.
 type terminalRootClamp struct {
 	active bool
-	// nonPendingTarget is the status a non-terminal, non-pending step collapses to:
-	// "completed" under a successful root, "canceled" under a failed/canceled/
-	// skipped root. Only meaningful when active.
-	nonPendingTarget string
+	// target is the status a non-terminal step collapses to: "canceled" under a
+	// canceled root, "skipped" under every other terminal root. Only meaningful
+	// when active.
+	target string
 	// postTerminal holds the ids of the run members that execute after the root
 	// settles (see postTerminalMemberIDs); the clamp leaves them unchanged.
 	postTerminal map[string]bool
@@ -69,15 +79,13 @@ func clampForRootStatus(rootStatus string) terminalRootClamp {
 	if !isTerminalRunNodeStatus(rootStatus) {
 		return terminalRootClamp{}
 	}
-	// A successful root (completed/done) collapses its unfinished steps to
-	// "completed"; every other terminal root (failed/canceled/skipped) collapses
-	// them to "canceled". presentationStatus never yields "done", but classifying
-	// it here keeps the mapping total over the terminal taxonomy.
-	target := "canceled"
-	if rootStatus == "completed" || rootStatus == "done" {
-		target = "completed"
+	// A canceled root's unfinished steps were (or will be) closed canceled by the
+	// run cancel; every other terminal root's were (or will be) swept skipped.
+	target := "skipped"
+	if rootStatus == "canceled" {
+		target = "canceled"
 	}
-	return terminalRootClamp{active: true, nonPendingTarget: target}
+	return terminalRootClamp{active: true, target: target}
 }
 
 // RunStepClamp clamps a run's step statuses against the run's canonical
@@ -163,16 +171,12 @@ func (c terminalRootClamp) applyTo(beadID, status string) string {
 
 // apply clamps one step presentation status under a terminal root. Already-terminal
 // statuses are returned unchanged — they are real recorded outcomes, including the
-// gc.outcome-derived failed/skipped/canceled a closed step carries. A non-terminal
-// pending step (never started) becomes "skipped"; every other non-terminal step
-// (active/running/ready/blocked) becomes the root's terminal target. An inactive
-// clamp returns the status unchanged.
+// gc.outcome-derived failed/skipped/canceled a closed step carries. Every
+// non-terminal step, started or not, becomes the root's terminal target. An
+// inactive clamp returns the status unchanged.
 func (c terminalRootClamp) apply(status string) string {
 	if !c.active || isTerminalRunNodeStatus(status) {
 		return status
 	}
-	if status == "pending" {
-		return "skipped"
-	}
-	return c.nonPendingTarget
+	return c.target
 }
