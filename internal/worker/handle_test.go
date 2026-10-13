@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2232,7 +2233,7 @@ func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *tes
 		t.Fatalf("History(before).TranscriptStreamID = %q, want %q", before.TranscriptStreamID, firstTranscript)
 	}
 	if got := len(before.Entries); got != 2 {
-		t.Fatalf("len(History(before).Entries) = %d, want 2", got)
+		t.Fatalf("len(History(before).Entries) = %d, want 2: %+v", got, before.Entries)
 	}
 
 	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
@@ -2862,5 +2863,215 @@ func TestSessionHandleHistoryIdentitySurvivesLateCodexResumeKey(t *testing.T) {
 	}
 	if after.ProviderSessionID != history.ProviderSessionID || after.TranscriptStreamID != history.TranscriptStreamID {
 		t.Fatal("same provider transcript changed identity")
+	}
+}
+
+// keyedClaudeHistorySession is a started Claude session whose key gc minted
+// before launch, with its first conversation's transcript already read once
+// through handle, the long-lived reader these tests stitch against.
+type keyedClaudeHistorySession struct {
+	handle  *SessionHandle
+	store   *beads.MemStore
+	slugDir string
+	key     string
+	before  *HistorySnapshot
+}
+
+var (
+	keyedClaudeBeforeTurns = []map[string]any{
+		{"uuid": "before-user", "type": "user", "message": map[string]any{"role": "user", "content": "remember alpha"}},
+		{"uuid": "before-assistant", "parentUuid": "before-user", "type": "assistant", "message": map[string]any{"role": "assistant", "content": "remembered alpha"}},
+	}
+	keyedClaudeAfterTurns = []map[string]any{
+		{"uuid": "after-user", "type": "user", "message": map[string]any{"role": "user", "content": "fresh start"}},
+		{"uuid": "after-assistant", "parentUuid": "after-user", "type": "assistant", "message": map[string]any{"role": "assistant", "content": "hello again"}},
+	}
+)
+
+func startKeyedClaudeHistorySession(t *testing.T) keyedClaudeHistorySession {
+	t.Helper()
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	// The stale-resume-key probe delay is production timing, not what these
+	// tests own; skip it so the keyed (session-id) start does not sleep.
+	manager := sessionpkg.NewManagerWithOptions(store, runtime.NewFake(), sessionpkg.WithStaleKeyDetectionWaiter(
+		func(context.Context, string) error { return nil },
+	), sessionpkg.WithCityPath(t.TempDir()))
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		Session: SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+			Resume: sessionpkg.ProviderResume{
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+	if info.SessionKey == "" {
+		t.Fatal("session_key is empty, want a keyed Claude transcript")
+	}
+
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, info.SessionKey+".jsonl"), keyedClaudeBeforeTurns)
+	before, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(before): %v", err)
+	}
+	if got := historyEntryIDs(before); !reflect.DeepEqual(got, []string{"before-user", "before-assistant"}) {
+		t.Fatalf("History(before) IDs = %v, want [before-user before-assistant]", got)
+	}
+	return keyedClaudeHistorySession{handle: handle, store: store, slugDir: slugDir, key: info.SessionKey, before: before}
+}
+
+// A long-lived handle (the structured transcript stream holds one) must not
+// stitch the conversation a fresh reset abandoned in front of the new one. The
+// reset keeps the bead but starts a new continuation epoch, so the logical
+// conversation changes even though GCSessionID stays the bead ID (WC-CONT-002).
+func TestSessionHandleHistoryDoesNotStitchAcrossFreshReset(t *testing.T) {
+	s := startKeyedClaudeHistorySession(t)
+	handle, store, slugDir, before := s.handle, s.store, s.slugDir, s.before
+
+	// The state every fresh reset leaves: the reset clears session_key and the
+	// next launch mints a new one, and the start that consumes
+	// continuation_reset_pending advances continuation_epoch once.
+	const resetKey = "11111111-2222-4333-8444-555555555555"
+	if err := store.SetMetadataBatch(handle.sessionID, map[string]string{
+		"session_key":        resetKey,
+		"continuation_epoch": "2",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(reset): %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, resetKey+".jsonl"), keyedClaudeAfterTurns)
+
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(after) IDs = %v, want only the reset conversation [after-user after-assistant]", got)
+	}
+	if after.LogicalConversationID == before.LogicalConversationID {
+		t.Fatalf("LogicalConversationID = %q before and after a fresh reset, want a new logical conversation", after.LogicalConversationID)
+	}
+	if before.GCSessionID != handle.sessionID || after.GCSessionID != handle.sessionID {
+		t.Fatalf("GCSessionID before/after = %q/%q, want bead ID %q", before.GCSessionID, after.GCSessionID, handle.sessionID)
+	}
+
+	repeat, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(repeat): %v", err)
+	}
+	if got := historyEntryIDs(repeat); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(repeat) IDs = %v, want stable [after-user after-assistant]", got)
+	}
+}
+
+// A fresh reset's start commits the new epoch and clears session_key before it
+// mints the key the new conversation launches under. A read in that window
+// must not hand the long-lived handle the abandoned transcript as the new
+// conversation, or the read after the mint stitches the two together.
+func TestSessionHandleHistoryDoesNotStitchAbandonedTranscriptBeforeKeyMint(t *testing.T) {
+	s := startKeyedClaudeHistorySession(t)
+	// The abandoned conversation's last write lands after the handle cached
+	// it, so the cached generation no longer short-circuits the next load.
+	writeWorkerTestJSONL(t, filepath.Join(s.slugDir, s.key+".jsonl"), append(slices.Clone(keyedClaudeBeforeTurns),
+		map[string]any{"uuid": "before-late", "parentUuid": "before-assistant", "type": "user", "message": map[string]any{"role": "user", "content": "one more"}},
+	))
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key":        "",
+		"continuation_epoch": "2",
+		"state":              string(sessionpkg.StateCreating),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(pre-wake): %v", err)
+	}
+	if _, err := s.handle.History(context.Background(), HistoryRequest{}); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("History(before key mint) err = %v, want ErrHistoryUnavailable", err)
+	}
+
+	const resetKey = "11111111-2222-4333-8444-555555555555"
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key": resetKey,
+		"state":       string(sessionpkg.StateActive),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(key mint): %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(s.slugDir, resetKey+".jsonl"), keyedClaudeAfterTurns)
+	after, err := s.handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(after) IDs = %v, want only the reset conversation [after-user after-assistant]", got)
+	}
+}
+
+// A wake_mode=fresh session that slept with no reset pending wakes into a new
+// conversation without advancing its continuation epoch; only the key gc mints
+// for the new launch differs. The long-lived handle must still not stitch the
+// previous conversation in front of it.
+func TestSessionHandleHistoryDoesNotStitchFreshWakeThatKeepsEpoch(t *testing.T) {
+	s := startKeyedClaudeHistorySession(t)
+	// A sleep keeps the key and the epoch: still the same conversation.
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{"state": string(sessionpkg.StateAsleep)}); err != nil {
+		t.Fatalf("SetMetadataBatch(sleep): %v", err)
+	}
+	asleep, err := s.handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(asleep): %v", err)
+	}
+	if got := historyEntryIDs(asleep); !reflect.DeepEqual(got, []string{"before-user", "before-assistant"}) || asleep.LogicalConversationID != s.before.LogicalConversationID {
+		t.Fatalf("History(asleep) = %v as %q, want [before-user before-assistant] as %q", got, asleep.LogicalConversationID, s.before.LogicalConversationID)
+	}
+
+	// The fresh wake's pre-wake commit clears the key and leaves the epoch;
+	// the start then mints the new key.
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key": "",
+		"state":       string(sessionpkg.StateCreating),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(pre-wake): %v", err)
+	}
+	if _, err := s.handle.History(context.Background(), HistoryRequest{}); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("History(before key mint) err = %v, want ErrHistoryUnavailable", err)
+	}
+	const wakeKey = "66666666-7777-4888-9999-aaaaaaaaaaaa"
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key": wakeKey,
+		"state":       string(sessionpkg.StateActive),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(key mint): %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(s.slugDir, wakeKey+".jsonl"), keyedClaudeAfterTurns)
+
+	after, err := s.handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(after) IDs = %v, want only the woken conversation [after-user after-assistant]", got)
+	}
+	if after.LogicalConversationID == s.before.LogicalConversationID {
+		t.Fatalf("LogicalConversationID = %q before and after a fresh wake, want a new logical conversation", after.LogicalConversationID)
 	}
 }
