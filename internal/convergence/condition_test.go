@@ -3,6 +3,7 @@ package convergence
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -797,8 +798,24 @@ func TestConditionPATHUsesResolvedToolDirs(t *testing.T) {
 	}
 
 	got := conditionPATH()
-	if !strings.HasPrefix(got, toolDir+":") && got != toolDir {
-		t.Fatalf("conditionPATH() = %q, want prefix %q", got, toolDir)
+	if !strings.Contains(":"+got+":", ":"+toolDir+":") {
+		t.Fatalf("conditionPATH() = %q, want it to include the resolved tool dir %q", got, toolDir)
+	}
+	for _, name := range []string{"bd", "gc"} {
+		cmd := exec.Command("/bin/sh", "-c", "command -v "+name)
+		cmd.Env = []string{"PATH=" + got}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("resolve %s on %q: %v", name, got, err)
+		}
+		resolved, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := filepath.EvalSymlinks(filepath.Join(toolDir, name))
+		if resolved != want {
+			t.Errorf("gate %s resolves to %q, want %q", name, resolved, want)
+		}
 	}
 }
 
@@ -976,5 +993,49 @@ func TestRunConditionEnvVarsAvailable(t *testing.T) {
 	}
 	if !strings.Contains(result.Stdout, "PATH="+conditionPATH()) {
 		t.Errorf("expected resolved PATH in output, got: %s", result.Stdout)
+	}
+}
+
+// TestConditionPATHPinsEachToolWhenDirectoriesHoldCompetingCopies pins the
+// live failure. The controller resolved gc from a new install first on its
+// PATH and bd from ~/.local/bin, which also held an older gc. conditionPATH
+// listed the resolved tools' directories in bd, gc, dolt, jq order, so
+// ~/.local/bin came first and the gate's `gc` ran the older copy. Here several
+// directories hold competing copies, and every tool must run exactly the binary
+// the controller resolved.
+func TestConditionPATHPinsEachToolWhenDirectoriesHoldCompetingCopies(t *testing.T) {
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
+	t.Setenv("GC_HOME", t.TempDir())
+
+	writeTool := func(dir, name, says string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\necho "+says+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newDir, localDir, jqDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeTool(newDir, "gc", "gc-new")
+	writeTool(localDir, "bd", "bd-local")
+	writeTool(localDir, "gc", "gc-older")
+	writeTool(localDir, "dolt", "dolt-local")
+	writeTool(jqDir, "jq", "jq-usr")
+	writeTool(jqDir, "dolt", "dolt-older")
+	if err := os.Setenv("PATH", newDir+":"+localDir+":"+jqDir+":"+SafePATH); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"gc": "gc-new", "bd": "bd-local", "dolt": "dolt-local", "jq": "jq-usr"}
+
+	gatePATH := conditionPATH()
+	for name, says := range want {
+		cmd := exec.Command("/bin/sh", "-c", name)
+		cmd.Env = []string{"PATH=" + gatePATH}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("gate `%s` with PATH=%s: %v", name, gatePATH, err)
+		}
+		if got := strings.TrimSpace(string(out)); got != says {
+			t.Errorf("gate `%s` ran %q, want %q (the binary the controller resolved); PATH=%s", name, got, says, gatePATH)
+		}
 	}
 }
