@@ -420,6 +420,11 @@ type Tmux struct {
 	// terminateProcessKillPlan; tests inject a recorder to observe when
 	// termination happens without signaling real processes.
 	certifiedPaneTerminator func(processKillPlan) error
+
+	// codexStopSleep pauses between the steps of closing an interrupted Codex
+	// turn's background terminals (stopCodexBackgroundTerminals). Nil selects
+	// sleepWithContext; tests inject one so the pauses take no wall time.
+	codexStopSleep func(context.Context, time.Duration) error
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -2831,7 +2836,7 @@ type stagedDraftMarker struct {
 // a placeholder has not drained.
 var stagedDraftMarkers = map[string]stagedDraftMarker{
 	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
-	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
+	"codex":  {promptPrefix: codexPromptPrefix, marker: "[Pasted Content "},
 }
 
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {

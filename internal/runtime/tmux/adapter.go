@@ -60,6 +60,7 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.InputClearProvider            = (*Provider)(nil)
+	_ runtime.BackgroundWorkStopper         = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -706,6 +707,13 @@ func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow ti
 // before the next user turn is injected.
 func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
 	return p.tm.WaitForInterruptBoundary(ctx, name, since, timeout)
+}
+
+// StopBackgroundWork closes the background terminals a stopped Codex turn
+// left running. It implements [runtime.BackgroundWorkStopper]; see
+// [Tmux.StopBackgroundWork].
+func (p *Provider) StopBackgroundWork(ctx context.Context, name string) error {
+	return p.tm.StopBackgroundWork(ctx, name)
 }
 
 // ResetInterruptedTurn discards the just-interrupted Gemini user turn without
