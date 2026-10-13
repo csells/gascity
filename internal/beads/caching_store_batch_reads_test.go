@@ -225,6 +225,100 @@ func TestCachingStoreDepListBatchAnswersAsDepList(t *testing.T) {
 	}
 }
 
+// postgresRelationRefusal is how the bd/Postgres backend refuses a relation
+// read (ga-7i7ts), as bd prints it.
+const postgresRelationRefusal = `exit status 1: Error: operation "IssueRelations" not supported by the postgres backend`
+
+// refuseBatchDepList wraps a fake bd so a multi-id DOWN `bd dep list` (the
+// batch) is refused the way the bd/Postgres backend refuses it, while every
+// other command, a one-id `bd dep list` included, is answered.
+func refuseBatchDepList(run beads.CommandRunner) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if len(args) > 3 && args[0] == "dep" && args[1] == "list" && !slices.Contains(args, "--direction=up") {
+			ids := 0
+			for _, arg := range args[2:] {
+				if !strings.HasPrefix(arg, "-") {
+					ids++
+				}
+			}
+			if ids > 1 {
+				return nil, errors.New(postgresRelationRefusal)
+			}
+		}
+		return run(dir, name, args...)
+	}
+}
+
+// TestBdStoreDepListBatchReportsAnUnsupportedBackend pins that a backend
+// refusing the batched dep read is reported with ErrDepListBatchUnsupported
+// and no map, not as an empty map: an empty map reads to every caller as
+// "these anchors have no edges", so close ordering drops its blockers and the
+// scope-skip walk sees no dependencies, where the sentinel sends each caller
+// to its per-anchor reads.
+func TestBdStoreDepListBatchReportsAnUnsupportedBackend(t *testing.T) {
+	fake := newCountingFakeBd()
+	a := seedFake(t, fake, beads.Bead{Title: "a"})
+	b := seedFake(t, fake, beads.Bead{Title: "b"})
+	if err := fake.SeedDep(b.ID, a.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewBdStore("/fake-bd", refuseBatchDepList(fake.run))
+	deps, err := store.DepListBatch([]string{a.ID, b.ID})
+	if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+		t.Fatalf("DepListBatch on a backend that refuses it = (%v, %v), want ErrDepListBatchUnsupported", deps, err)
+	}
+	if deps != nil {
+		t.Fatalf("DepListBatch returned %v alongside its refusal; a caller reading it sees a graph with no edges", deps)
+	}
+}
+
+// TestBdStoreDepListBatchOneIDReadsBdsRowShape pins the one-id batch. A one-id
+// `bd dep list <id> --json` prints the depended-on beads' rows (with
+// dependency_type), not the dependency records a multi-id call prints, so a
+// one-id batch parsed as records keyed every edge under "" and reported the
+// anchor as edge-free.
+func TestBdStoreDepListBatchOneIDReadsBdsRowShape(t *testing.T) {
+	fake := newCountingFakeBd()
+	a := seedFake(t, fake, beads.Bead{Title: "a"})
+	b := seedFake(t, fake, beads.Bead{Title: "b"})
+	if err := fake.SeedDep(b.ID, a.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	store := fake.store()
+	got, err := store.DepListBatch([]string{b.ID})
+	if err != nil {
+		t.Fatalf("DepListBatch: %v", err)
+	}
+	want := map[string][]beads.Dep{b.ID: {{IssueID: b.ID, DependsOnID: a.ID, Type: "blocks"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DepListBatch(%s) = %#v, want %#v", b.ID, got, want)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("a one-id batch ran %d bd commands %v, want 1", len(fake.calls), fake.calls)
+	}
+}
+
+// TestCachingStoreDepListBatchOverAnUnsupportedBackendFallsBack pins the
+// cache's answer over a bd backend that refuses the batch: the sentinel, so the
+// caller reads each anchor with DepList, and those reads answer the edges.
+func TestCachingStoreDepListBatchOverAnUnsupportedBackendFallsBack(t *testing.T) {
+	fake := newCountingFakeBd()
+	a := seedFake(t, fake, beads.Bead{Title: "a"})
+	b := seedFake(t, fake, beads.Bead{Title: "b"})
+	if err := fake.SeedDep(b.ID, a.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cs := beads.NewCachingStoreForTest(beads.NewBdStore("/fake-bd", refuseBatchDepList(fake.run)), nil)
+	deps, err := cs.DepListBatch([]string{a.ID, b.ID})
+	if !errors.Is(err, beads.ErrDepListBatchUnsupported) || deps != nil {
+		t.Fatalf("cached DepListBatch over a refusing backend = (%v, %v), want (nil, ErrDepListBatchUnsupported)", deps, err)
+	}
+	single, err := cs.DepList(b.ID, "down")
+	if err != nil || len(single) != 1 || single[0].DependsOnID != a.ID {
+		t.Fatalf("per-anchor DepList(%s) = (%v, %v), want the blocks edge to %s", b.ID, single, err, a.ID)
+	}
+}
+
 // storeWithoutDepBatch hides MemStore's DepListBatch.
 type storeWithoutDepBatch struct {
 	beads.Store

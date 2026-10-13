@@ -85,12 +85,9 @@ func (c *CachingStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Be
 // A live cache whose edge set is complete answers the anchors it holds from
 // memory, as DepList does, and asks the backing store's batched read for the
 // rest in one round trip. Otherwise the whole batch goes to the backing store.
-// A lone anchor left over is read with the backing's DepList: a one-id
-// `bd dep list <id> --json` prints the depended-on beads' rows rather than the
-// dependency records BdStore.DepListBatch parses, so a one-id batch through
-// bd would report the anchor as edge-free. A backing store without the
-// batched read reports ErrDepListBatchUnsupported, which callers treat as the
-// cue to fall back to DepList per anchor.
+// A backing store without the batched read, or whose backend refuses it,
+// reports ErrDepListBatchUnsupported, which callers treat as the cue to fall
+// back to DepList per anchor (served from memory where this cache holds it).
 func (c *CachingStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	batch, ok := DepListBatchFor(c.backing)
 	if !ok {
@@ -110,15 +107,7 @@ func (c *CachingStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 		}
 	}
 	c.mu.RUnlock()
-	switch len(misses) {
-	case 0:
-		return deps, nil
-	case 1:
-		edges, err := c.backing.DepList(misses[0], "down")
-		if err != nil {
-			return nil, err
-		}
-		deps[misses[0]] = edges
+	if len(misses) == 0 {
 		return deps, nil
 	}
 	fetched, err := batch.DepListBatch(misses)
