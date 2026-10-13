@@ -453,6 +453,16 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionName:       sessionName,
 			}))
 		}
+		if hookMode && a.Implicit && strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) == "manual" {
+			// A client's provider chat (POST /sessions with kind=provider)
+			// runs under the provider's implicit agent only because that
+			// agent is named after the provider. It is not a pool worker:
+			// the worker persona tells the agent to claim queue work and
+			// drain, which ends the client's conversation after one turn.
+			// Like an unmanaged hook, it gets no persona.
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0, nil
+		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
 			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
