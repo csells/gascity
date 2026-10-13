@@ -3089,7 +3089,7 @@ export type RunStep = {
      */
     kind?: string;
     /**
-     * Closed step lifecycle status. Under a terminal run an unfinished step reads terminal (skipped if it never started, completed or canceled if it was in progress), except a step that executes after the run settles (the workflow finalizer, the teardown tail), which reads its own status until it closes.
+     * Closed step lifecycle status. Under a terminal run an unfinished step reads the status the run's wind-down closes it with (canceled for a canceled run, skipped otherwise), so it never changes from one terminal status to another; a step that executes after the run settles (the workflow finalizer, the teardown tail) reads its own status until it closes.
      */
     status: RunStepStatus;
     /**

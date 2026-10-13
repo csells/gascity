@@ -95,3 +95,46 @@ func runStepStatuses(t *testing.T, s *Server, runID string) map[string]RunStepSt
 	}
 	return statuses
 }
+
+// TestRunStepsTerminalClampPredictsTheDurableClose pins that a clamped step
+// reads the status dispatch durably writes when it closes the step, so the
+// projection never moves from one terminal status to another. A root settled
+// by the workflow finalizer (pass or fail), or closed skipped, leaves its open
+// members to the finalizer's sweep, which closes each gc.outcome=skipped,
+// started or not. A run canceled via POST /runs/{id}/cancel closes its open
+// members gc.outcome=canceled (and a finalizer settling a canceled workflow
+// sweeps them canceled), started or not. The clamp used to present a failed
+// run's in-progress step as canceled, which the sweep then contradicted with
+// skipped, and a canceled run's never-started step as skipped, which the
+// cancel's close contradicted with canceled.
+func TestRunStepsTerminalClampPredictsTheDurableClose(t *testing.T) {
+	for _, tc := range []struct {
+		outcome string
+		want    RunStepStatus
+	}{
+		{"pass", RunStepStatusSkipped},
+		{"fail", RunStepStatusSkipped},
+		{"skipped", RunStepStatusSkipped},
+		{"canceled", RunStepStatusCanceled},
+	} {
+		t.Run(tc.outcome, func(t *testing.T) {
+			root := runRootBead("runp", "implement", "closed")
+			root.Metadata["gc.outcome"] = tc.outcome
+			s := newRunServer(t,
+				beadCreatedEvent(1, root),
+				beadCreatedEvent(2, runChildBead("runp.started", "runp", "in_progress", nil)),
+				beadCreatedEvent(3, runChildBead("runp.never", "runp", "open", nil)),
+				beadCreatedEvent(4, runChildBead("runp.done", "runp", "closed", map[string]string{"gc.outcome": "pass"})),
+			)
+			steps := runStepStatuses(t, s, "runp")
+			for _, id := range []string{"runp.started", "runp.never"} {
+				if got := steps[id]; got != tc.want {
+					t.Errorf("root closed %s, %s still open: status = %q, want %q (what dispatch writes when it closes it)", tc.outcome, id, got, tc.want)
+				}
+			}
+			if got := steps["runp.done"]; got != RunStepStatusCompleted {
+				t.Errorf("recorded outcome: runp.done = %q, want completed", got)
+			}
+		})
+	}
+}
