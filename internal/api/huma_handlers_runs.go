@@ -302,7 +302,10 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 	// Derive the run's canonical lifecycle status exactly as laneToRun/deriveRunStatus
 	// do (root-terminality wins over lingering members), then clamp each step through
 	// it: a completed run must not report a step as eternally active when its close
-	// event was lost. A non-terminal run yields an inactive clamp (raw statuses stand).
+	// event was lost. A step that executes after the root settles (the workflow
+	// finalizer, the teardown tail) is not clamped: it has not closed yet, and
+	// presenting it skipped would be contradicted by its own close. A non-terminal
+	// run yields an inactive clamp (raw statuses stand).
 	byID := beadsByID(fold.beads)
 	root, rootFound := byID[input.RunID]
 	var rootPtr *beads.Bead
@@ -312,6 +315,7 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 	runStatus := runproj.CanonicalRunStatusForLane(lane, rootPtr, countStartedMembers(fold.beads, lane.ID))
 
 	members := topoSortRunSteps(runMemberBeads(fold.beads, input.RunID))
+	clamp := runproj.NewRunStepClamp(runStatus, members)
 	out := &RunStepsOutput{}
 	out.Body.RunID = input.RunID
 	out.Body.Steps = make([]RunStep, 0, len(members))
@@ -320,7 +324,7 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 		if m.ID == input.RunID {
 			continue // the root is the run, not a step
 		}
-		status := RunStepStatus(runproj.ClampStepStatusForRun(runStatus, string(deriveRunStepStatus(m))))
+		status := RunStepStatus(clamp.Apply(m.ID, string(deriveRunStepStatus(m))))
 		out.Body.Steps = append(out.Body.Steps, RunStep{
 			ID:       m.ID,
 			Title:    runStepTitle(m),
