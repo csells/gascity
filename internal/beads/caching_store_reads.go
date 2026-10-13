@@ -334,26 +334,28 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
 	removedLiveMissing := make(map[string]struct{})
-	for _, id := range c.staleParentCacheIDs(query.ParentID, items) {
-		fresh, err := c.backing.Get(id)
+	staleParents := c.staleParentCacheIDs(query.ParentID, items)
+	for i, read := range c.readBackingRows(staleParents) {
+		id := staleParents[i]
 		switch {
-		case err == nil:
-			refreshedParents[id] = cloneBead(fresh)
-		case errors.Is(err, ErrNotFound):
+		case read.err == nil:
+			refreshedParents[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
 			removedParents[id] = struct{}{}
 		default:
-			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, err))
+			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, read.err))
 		}
 	}
-	for _, id := range c.staleLiveCacheIDs(query, items) {
-		fresh, err := c.backing.Get(id)
+	staleLive := c.staleLiveCacheIDs(query, items)
+	for i, read := range c.readBackingRows(staleLive) {
+		id := staleLive[i]
 		switch {
-		case err == nil:
-			refreshedLiveMissing[id] = cloneBead(fresh)
-		case errors.Is(err, ErrNotFound):
+		case read.err == nil:
+			refreshedLiveMissing[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
 			removedLiveMissing[id] = struct{}{}
 		default:
-			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, err))
+			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, read.err))
 		}
 	}
 	if len(items) == 0 && len(refreshedParents) == 0 && len(removedParents) == 0 &&
