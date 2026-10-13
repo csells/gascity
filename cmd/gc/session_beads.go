@@ -1648,6 +1648,17 @@ func (r retiredCleanup) cleanup(id string) {
 	cancelStateAssignedToRetiredSessionBead(r.store, id, r.clock.Now(), nil)
 }
 
+// clientProviderChat reports whether a session with this origin, running
+// under agent, is a client's provider chat: a manual session (POST /sessions
+// with kind=provider) whose template is the provider's implicit agent, which
+// it runs under only because that agent is named after the provider. The chat
+// has no agent identity of its own, so no agent_name is stamped on it; one
+// would make every later read resolve it as kind "agent" (a pool member of the
+// implicit agent) instead of the provider session its create reported.
+func clientProviderChat(origin string, agent *config.Agent) bool {
+	return origin == "manual" && agent != nil && agent.Implicit
+}
+
 // syncSessionBeadsWithSnapshotAndRigStores ensures every desired session has a corresponding session
 // bead. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
@@ -2207,7 +2218,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				queueAliasGuardedMeta("work_dir", tp.WorkDir)
 			}
 		}
-		if legacyNeedsConcreteIdentity && agentName != "" {
+		if legacyNeedsConcreteIdentity && agentName != "" && !clientProviderChat(origin, findAgentByTemplate(cfg, tp.TemplateName)) {
 			queueAliasGuardedMeta("agent_name", agentName)
 		}
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {
