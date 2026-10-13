@@ -67,7 +67,7 @@ evidence from tests, source, an issue, or a commit.
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
 
-## Manual close during reconciliation
+## Manual Close During Reconciliation
 
 A desired manual entry retains a previously discovered conversation; it is not
 a create request. If a close wins before synchronization refreshes the store,
