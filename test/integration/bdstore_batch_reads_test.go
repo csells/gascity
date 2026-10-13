@@ -64,6 +64,33 @@ func TestBdStoreBatchedDispatchReadsMatchPerCallReads(t *testing.T) {
 		t.Fatalf("children = %v, want the 3 non-ephemeral children", got)
 	}
 
+	// At both tiers the batch must answer what a List over each ParentID at
+	// TierBoth answers (bd list --parent unioned with the wisp query), which is
+	// how the bead-policy layer reads children: the ephemeral child included.
+	var bothTiers []string
+	for _, parent := range []string{p1.ID, p2.ID} {
+		children, err := store.List(beads.ListQuery{ParentID: parent, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List(%s, TierBoth): %v", parent, err)
+		}
+		for _, c := range children {
+			bothTiers = append(bothTiers, c.ID+"<"+c.ParentID+":"+c.Status)
+		}
+	}
+	batchedBoth, err := store.ChildrenOfAny([]string{p1.ID, p2.ID}, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("ChildrenOfAny(WithBothTiers): %v", err)
+	}
+	var gotBoth []string
+	for _, c := range batchedBoth {
+		gotBoth = append(gotBoth, c.ID+"<"+c.ParentID+":"+c.Status)
+	}
+	slices.Sort(bothTiers)
+	slices.Sort(gotBoth)
+	if !slices.Equal(gotBoth, bothTiers) || len(gotBoth) != 4 {
+		t.Fatalf("ChildrenOfAny(WithBothTiers) = %v, want the TierBoth List union %v (4 children, the ephemeral one included)", gotBoth, bothTiers)
+	}
+
 	leaf := mk(beads.Bead{Title: "leaf control", Type: "task", Metadata: map[string]string{"keep": "v"}})
 	status := "closed"
 	row, err := store.UpdateReporting(leaf.ID, beads.UpdateOpts{Status: &status, Metadata: map[string]string{"gc.outcome": "pass"}})

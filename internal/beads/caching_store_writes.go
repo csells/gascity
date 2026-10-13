@@ -587,14 +587,16 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	refreshed := make([]refreshedBead, 0, len(ids))
 	var refreshErr error
 	refreshFailed := make(map[string]struct{})
-	for _, id := range ids {
-		fresh, getErr := c.backing.Get(id)
-		if getErr != nil {
+	// One batched read for the whole close where the backing has one, not a
+	// `bd show` per closed bead.
+	for i, read := range c.readBackingRows(ids) {
+		id := ids[i]
+		if read.err != nil {
 			refreshFailed[id] = struct{}{}
-			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, getErr))
+			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, read.err))
 			continue
 		}
-		refreshed = append(refreshed, refreshedBead{id: id, bead: fresh})
+		refreshed = append(refreshed, refreshedBead{id: id, bead: read.bead})
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
