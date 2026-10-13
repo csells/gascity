@@ -622,22 +622,18 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
 func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
-	if info.Closed {
-		return
-	}
-	stateHandle, peekHandle := s.sessionRuntimeHandles(runtimeHandle, info)
-	if stateHandle == nil {
-		return
-	}
-	state, err := stateHandle.State(context.Background())
-	if err != nil {
+	if info.Closed || runtimeHandle == nil {
 		return
 	}
 	// running reports the runtime in every open state: a start-pending or
 	// draining session can have a live agent, and a client checking for
-	// quiescence must see it. The rest of the enrichment is for active
-	// sessions only.
-	resp.Running = workerPhaseHasLiveOutput(state.Phase)
+	// quiescence must see it. It is the runtime probe, the same one for every
+	// endpoint, never the worker phase: that phase is derived from the
+	// lifecycle state, so a start-pending or creating session reads
+	// "starting" before any agent process exists, and the single-session read
+	// would claim a runtime the list endpoints do not see. The rest of the
+	// enrichment is for active sessions only.
+	resp.Running = sessionRuntimeRunning(s.state.SessionProvider(), info.SessionName)
 	if info.State != session.StateActive {
 		return
 	}
@@ -662,41 +658,43 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	// Peek preview (opt-in, only when running). peekLines=0 means "use
 	// default" so existing callers that omit the query param keep the
 	// historical 5-line preview.
-	if wantPeek && resp.Running && peekHandle != nil {
-		lines := peekLines
-		if lines <= 0 {
-			lines = defaultSessionPeekLines
-		}
-		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
-			resp.LastOutput = output
+	if wantPeek && resp.Running {
+		if peekHandle := s.sessionPeekHandle(runtimeHandle, info); peekHandle != nil {
+			lines := peekLines
+			if lines <= 0 {
+				lines = defaultSessionPeekLines
+			}
+			if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
+				resp.LastOutput = output
+			}
 		}
 	}
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
 }
 
-// sessionRuntimeHandles resolves the state and peek handles for an active
-// session from its runtime handle. It returns nil handles when none is usable
-// (unsupported handle type, missing bead store, or a worker lookup error); the
-// caller treats a nil state handle as "nothing to enrich".
-func (s *Server) sessionRuntimeHandles(runtimeHandle any, info session.Info) (worker.StateHandle, worker.PeekHandle) {
+// sessionPeekHandle resolves the peek handle for an active session from its
+// runtime handle. It returns nil when none is usable (unsupported handle type,
+// missing bead store, or a worker lookup error). A bare runtime provider is
+// resolved to the session's worker handle only here, when a peek is wanted.
+func (s *Server) sessionPeekHandle(runtimeHandle any, info session.Info) worker.PeekHandle {
 	switch v := runtimeHandle.(type) {
 	case worker.Handle:
-		return v, v
+		return v
 	case sessionResponseHandle:
-		return v, v
+		return v
 	case runtime.Provider:
 		store := s.state.SessionsBeadStore()
 		if store.Store == nil {
-			return nil, nil
+			return nil
 		}
 		resolved, err := s.workerHandleForSession(store.Store, info.ID)
 		if err != nil {
-			return nil, nil
+			return nil
 		}
-		return resolved, resolved
+		return resolved
 	default:
-		return nil, nil
+		return nil
 	}
 }
 
