@@ -455,6 +455,7 @@ go_test(
         "session_resolution_reserved_name_test.go",
         "session_resolved_config_test.go",
         "session_response_wire_test.go",
+        "session_running_state_test.go",
         "session_starting_error_test.go",
         "session_stream_acp_test.go",
         "session_stream_capability_test.go",

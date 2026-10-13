@@ -52,7 +52,12 @@ type sessionResponse struct {
 	AgentKind string `json:"agent_kind,omitempty"`
 
 	// Enrichment fields for dashboard consumption.
-	Running       bool   `json:"running"`
+	//
+	// Running is a point-in-time observation of the session's runtime: whether
+	// it held a live agent process when this response was built, in any open
+	// state. A session in a transitional state (creating, start-pending,
+	// draining) can start or stop its process right after that.
+	Running       bool   `json:"running" doc:"Whether the session's runtime held a live agent process when this response was built, in any open state. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
 	ActiveBead    string `json:"active_bead,omitempty"`
 	LastOutput    string `json:"last_output,omitempty"`
 	Model         string `json:"model,omitempty"`
@@ -83,8 +88,12 @@ type sessionResponseHandle interface {
 	worker.PeekHandle
 }
 
+// runtimeSessionResponseHandle returns the runtime handle the list endpoints
+// enrich a session from. Every open session gets one, not only active ones:
+// running must report a live agent in a transitional state (creating,
+// start-pending, draining) too.
 func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponseHandle {
-	if info.State != session.StateActive {
+	if info.Closed {
 		return nil
 	}
 	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
@@ -613,7 +622,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
 func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
-	if info.State != session.StateActive {
+	if info.Closed {
 		return
 	}
 	stateHandle, peekHandle := s.sessionRuntimeHandles(runtimeHandle, info)
@@ -624,7 +633,14 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	if err != nil {
 		return
 	}
+	// running reports the runtime in every open state: a start-pending or
+	// draining session can have a live agent, and a client checking for
+	// quiescence must see it. The rest of the enrichment is for active
+	// sessions only.
 	resp.Running = workerPhaseHasLiveOutput(state.Phase)
+	if info.State != session.StateActive {
+		return
+	}
 
 	// Active bead: search rig stores for in_progress work assigned to the
 	// concrete session first, then fall back to alias/runtime/session names.
