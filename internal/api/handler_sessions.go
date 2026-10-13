@@ -53,11 +53,14 @@ type sessionResponse struct {
 
 	// Enrichment fields for dashboard consumption.
 	//
-	// Running is a point-in-time observation of the session's runtime: whether
-	// it held a live agent process when this response was built, in any open
-	// state. A session in a transitional state (creating, start-pending,
-	// draining) can start or stop its process right after that.
-	Running       bool   `json:"running" doc:"Whether the session's runtime held a live agent process when this response was built, in any open state. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
+	// Running is a point-in-time observation of the session's runtime, in any
+	// open state: whether the provider held it live when this response was
+	// built (sessionRuntimeRunning). On tmux that is a pane whose process has
+	// not exited, not proof the agent itself is up: a launch wrapper or shell
+	// pane reads true, a remain-on-exit corpse reads false. A session in a
+	// transitional state (creating, start-pending, draining) can start or stop
+	// its process right after that.
+	Running       bool   `json:"running" doc:"Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
 	ActiveBead    string `json:"active_bead,omitempty"`
 	LastOutput    string `json:"last_output,omitempty"`
 	Model         string `json:"model,omitempty"`
