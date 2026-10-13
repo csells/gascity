@@ -127,7 +127,7 @@ type RunStatusCounts struct {
 type RunStep struct {
 	ID       string        `json:"id" doc:"Step (child bead) identifier."`
 	Title    string        `json:"title" doc:"Step title."`
-	Status   RunStepStatus `json:"status" doc:"Closed step lifecycle status."`
+	Status   RunStepStatus `json:"status" doc:"Closed step lifecycle status. Under a terminal run an unfinished step reads terminal (skipped if it never started, completed or canceled if it was in progress), except a step that executes after the run settles (the workflow finalizer, the teardown tail), which reads its own status until it closes."`
 	Kind     string        `json:"kind,omitempty" doc:"Step kind (bead type)."`
 	Assignee string        `json:"assignee,omitempty" doc:"Current assignee, when set."`
 }
