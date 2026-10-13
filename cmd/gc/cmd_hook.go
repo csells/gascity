@@ -35,19 +35,20 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Find routed work for an agent",
 		Long: `Finds routed work using the agent's work_query config.
 
-Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
+Without --inject: prints normalized ready-only output, exits 0 if work exists,
+1 if the queue is empty, and 2 if the work query itself failed (for example bd
+missing from PATH or a store bd could not read); the failure is named on stderr.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
-With --claim: runs the standard startup claim protocol for one work item.
+With --claim: runs the standard startup claim protocol for one work item. A
+failed work query is an error (nothing on stdout), never a drain result.
 
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
 fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
-unknown, not empty. Any other work-query failure exits 1. This applies with and
-without --claim, and neither writes a drain result. The generated default work
-query discards bd's errors in its single-store tiers, so there a store that
-fails fast still reads as no work; only a deadline overrun exits 2. Only the
-agent's own store reports: other stores the hook also searches are
-best-effort, and one that fails reads as having no work.
+unknown, not empty. This applies with and without --claim. Any other
+work-query failure exits 2 without --claim and 1 with --claim. Neither writes a
+drain result. Only the agent's own store reports: other stores the hook also
+searches are best-effort, and one that fails reads as having no work.
 
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
@@ -928,7 +929,8 @@ func workQueryStoreUnavailable(err error) bool {
 // classification, so they cannot disagree. Both gc hook doors report a failed
 // work query through it (doHook directly, the claim reads via
 // reportClaimWorkQueryFailure) so the published contract cannot drift between
-// them.
+// them. doHook returns hookExitWorkQueryFailed for every failure rather than
+// this code: plain gc hook keeps exit 1 for an answered, empty queue only.
 func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
 	classified := classifyWorkQueryStoreUnavailable(err)
 	if errors.Is(classified, beads.ErrStoreUnavailable) {
@@ -1216,12 +1218,11 @@ type hookVisibility struct {
 // Rendering an unreachable store as no work is the chronic
 // idle-agents-with-work-waiting dead-drop.
 //
-// It fires only when the failure reaches gc hook, and two layers keep some
+// It fires only when the failure reaches gc hook. The generated work query
+// fails with the reader's own status and keeps bd's stderr when a store read
+// fails (internal/config/workquery.go), so a store that fails fast reaches gc
+// hook, not only one that overruns the deadline. One layer still keeps some
 // failures from reaching it:
-//   - The generated single-store work query discards bd's stderr and falls
-//     through to "[]" when every ready tier fails (internal/config/workquery.go),
-//     so there a store that fails fast still reads as no work; only the
-//     deadline, which bounds every query, surfaces it.
 //   - Only a failure of the agent's own (primary) store is reported. Other
 //     stores gc hook queries beside it are best-effort discovery
 //     (bestStoreWithWork), so one that fails or times out reads as no work
@@ -1374,13 +1375,22 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
 }
 
+// hookExitWorkQueryFailed is plain `gc hook`'s exit code when the work query
+// itself failed — bd missing from PATH, a store bd could not read, a timeout.
+// It is deliberately not 1: exit 1 means "the query answered, and the queue is
+// empty", and a caller that idles or drains on that answer must not do so
+// because the query never ran.
+const hookExitWorkQueryFailed = 2
+
 // doHook is the pure logic for gc hook. Runs the work query and outputs
 // results based on mode. Without inject: prints normalized ready-only output,
-// returns 0 if work exists, 1 if empty. A work query that fails because the
-// store could not be read (classifyWorkQueryStoreUnavailable) returns 2,
-// prints nothing on stdout, and puts GC_HOOK_STORE_UNAVAILABLE on stderr; any
-// other failure returns 1 (reportWorkQueryFailure). With inject: skips the
-// work query and returns 0.
+// returns 0 if work exists, 1 if empty. A work query that fails returns
+// hookExitWorkQueryFailed (2) and names the failure on stderr
+// (reportWorkQueryFailure). One that fails because the store could not be read
+// (classifyWorkQueryStoreUnavailable) prints nothing on stdout and puts
+// GC_HOOK_STORE_UNAVAILABLE on stderr; any other failure first surfaces
+// whatever partial output the query produced. With inject: skips the work
+// query and returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	if inject {
 		return 0
@@ -1391,13 +1401,17 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 		// A store that could not be read is not an empty queue: no partial
 		// stdout (the partial text stays in the stderr diagnostic), token +
 		// exit 2 (reportWorkQueryFailure). Any other failure first surfaces
-		// whatever partial output the query produced, then reports exit 1.
+		// whatever partial output the query produced.
 		if !workQueryStoreUnavailable(err) {
 			if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
 				fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 			}
 		}
-		return reportWorkQueryFailure("gc hook", err, stderr)
+		// Plain gc hook keeps exit 1 for an answered, empty queue, so every
+		// failure exits 2, store-unavailable or not; reportWorkQueryFailure
+		// names it on stderr, with the token when the store could not be read.
+		reportWorkQueryFailure("gc hook", err, stderr)
+		return hookExitWorkQueryFailed
 	}
 
 	trimmed := strings.TrimSpace(output)

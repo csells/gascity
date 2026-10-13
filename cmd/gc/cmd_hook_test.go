@@ -1308,8 +1308,9 @@ func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
-	if code != 1 {
-		t.Errorf("doHook(error) = %d, want 1", code)
+	// A failed query is not the no-work exit 1.
+	if code != hookExitWorkQueryFailed {
+		t.Errorf("doHook(error) = %d, want %d", code, hookExitWorkQueryFailed)
 	}
 	if !strings.Contains(stderr.String(), "command failed") {
 		t.Errorf("stderr = %q, want to contain %q", stderr.String(), "command failed")
@@ -1326,8 +1327,10 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
-	if code != 1 {
-		t.Errorf("doHook(error with output) = %d, want 1", code)
+	// The partial stdout may read "[]"; the exit code is what keeps a timeout
+	// from reading as an empty queue.
+	if code != hookExitWorkQueryFailed {
+		t.Errorf("doHook(error with output) = %d, want %d", code, hookExitWorkQueryFailed)
 	}
 	if got := stdout.String(); got != "[]" {
 		t.Errorf("stdout = %q, want partial JSON output", got)
