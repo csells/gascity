@@ -725,8 +725,9 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	index := s.latestIndex()
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
-	// released on any error, so every fallible step lives in the closure.
-	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
+	// released on any error, so every fallible step lives in the closure. A
+	// replay returns the index cached with the body, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body, index,
 		func() (beads.Bead, error) {
 			candidate := beads.Bead{
 				Title:       input.Body.Title,
@@ -770,8 +771,8 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	}
 
 	return &IndexOutput[beads.Bead]{
-		Index: index,
-		Body:  b,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 

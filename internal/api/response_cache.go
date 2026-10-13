@@ -316,9 +316,10 @@ func (s *Server) endResponseRefresh(key string) {
 }
 
 // indexedResponse pairs a cached body with the event index captured before
-// the body was built. A cache hit must report that index, not the current
-// head: X-GC-Index tells a client where to resume or block, and a head newer
-// than the body would skip the changes the body lacks.
+// the body was built. A cache hit or an Idempotency-Key replay must report
+// that index, not the current head: X-GC-Index tells a client where to resume
+// or block, and a head newer than the body would skip the changes the body
+// lacks.
 type indexedResponse[T any] struct {
 	Index uint64 `json:"index"`
 	Body  T      `json:"body"`

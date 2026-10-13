@@ -1247,6 +1247,7 @@ func (s *Server) humaHandleSessionUnpin(ctx context.Context, input *SessionIDInp
 }
 
 func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -1294,7 +1295,7 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 		return nil, humaSessionManagerError(err)
 	}
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != ""),
 	}, nil
 }

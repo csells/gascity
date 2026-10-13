@@ -205,7 +205,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 			})
 			if historyErr != nil {
 				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
-					return s.structuredTranscriptFallback(info, input.IncludeThinking)
+					return s.structuredTranscriptFallback(index, info, input.IncludeThinking)
 				}
 				if problem := transcriptCursorInvalidatedProblem(historyErr, "reading session history"); problem != nil {
 					return nil, problem
@@ -290,7 +290,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 	}
 
 	if wantStructured {
-		return s.structuredTranscriptFallback(info, input.IncludeThinking)
+		return s.structuredTranscriptFallback(index, info, input.IncludeThinking)
 	}
 
 	if wantRaw {
@@ -339,8 +339,11 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 	}, nil
 }
 
-func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
-	index := s.latestIndex()
+// structuredTranscriptFallback builds the degraded structured transcript from
+// info when no structured history is available. index is the caller's
+// handler-entry capture, taken before info was read, so it never covers an
+// event the body does not reflect.
+func (s *Server) structuredTranscriptFallback(index uint64, info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	activity := string(worker.TailActivityIdle)
 	output := ""
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {

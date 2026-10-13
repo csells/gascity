@@ -43,6 +43,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// The list projects the config, whose swaps do not advance the
 		// event index, so the key also carries the config generation.
 		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
+		// A hit needs the exact index captured above, before any state was
+		// read, so the cached body reflects every change up to index and
+		// returning this request's index with it is safe. A key that can hit
+		// across index changes (the time bucket /status uses) must cache the
+		// build index with the body instead (indexedResponse).
 		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
