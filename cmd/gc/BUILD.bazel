@@ -1813,6 +1813,7 @@ go_test(
         "session_reconciler_inc003_test.go",
         "session_reconciler_killed_seat_test.go",
         "session_reconciler_killsite_fold_test.go",
+        "session_reconciler_manual_create_test.go",
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",

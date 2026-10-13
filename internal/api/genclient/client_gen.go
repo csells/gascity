@@ -9684,7 +9684,7 @@ type GetV0CityByCityNameAgentsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Pool Filter by pool name.
@@ -9753,7 +9753,7 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9795,7 +9795,7 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 }
 
@@ -9828,7 +9828,7 @@ type GetV0CityByCityNameConvoysParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9852,7 +9852,7 @@ type GetV0CityByCityNameEventsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -10104,7 +10104,7 @@ type GetV0CityByCityNameMailParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -10392,7 +10392,7 @@ type GetV0CityByCityNameRigsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Git Include git status.
@@ -10608,7 +10608,7 @@ type GetV0CityByCityNameStatusParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.

@@ -29895,12 +29895,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
@@ -31551,12 +31551,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
@@ -32075,12 +32075,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           }
@@ -33450,12 +33450,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
@@ -33807,12 +33807,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
@@ -38234,12 +38234,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
@@ -45333,12 +45333,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
@@ -50649,12 +50649,12 @@
             }
           },
           {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
             "explode": false,
             "in": "query",
             "name": "wait",
             "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.",
               "type": "string"
             }
           },
