@@ -4070,28 +4070,30 @@ type SessionRespondOutputBody struct {
 
 // SessionResponse defines model for SessionResponse.
 type SessionResponse struct {
-	ActiveBead             *string                 `json:"active_bead,omitempty"`
-	Activity               *string                 `json:"activity,omitempty"`
-	AgentKind              *string                 `json:"agent_kind,omitempty"`
-	Alias                  *string                 `json:"alias,omitempty"`
-	Attached               bool                    `json:"attached"`
-	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                  `json:"context_pct,omitempty"`
-	ContextWindow          *int64                  `json:"context_window,omitempty"`
-	CreatedAt              string                  `json:"created_at"`
-	DisplayName            *string                 `json:"display_name,omitempty"`
-	Id                     string                  `json:"id"`
-	Kind                   *string                 `json:"kind,omitempty"`
-	LastActive             *string                 `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                 `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string                 `json:"last_output,omitempty"`
-	Metadata               *map[string]string      `json:"metadata,omitempty"`
-	Model                  *string                 `json:"model,omitempty"`
-	Options                *map[string]string      `json:"options,omitempty"`
-	Pool                   *string                 `json:"pool,omitempty"`
-	Provider               string                  `json:"provider"`
-	Reason                 *string                 `json:"reason,omitempty"`
-	Rig                    *string                 `json:"rig,omitempty"`
+	ActiveBead             *string            `json:"active_bead,omitempty"`
+	Activity               *string            `json:"activity,omitempty"`
+	AgentKind              *string            `json:"agent_kind,omitempty"`
+	Alias                  *string            `json:"alias,omitempty"`
+	Attached               bool               `json:"attached"`
+	ConfiguredNamedSession *bool              `json:"configured_named_session,omitempty"`
+	ContextPct             *int64             `json:"context_pct,omitempty"`
+	ContextWindow          *int64             `json:"context_window,omitempty"`
+	CreatedAt              string             `json:"created_at"`
+	DisplayName            *string            `json:"display_name,omitempty"`
+	Id                     string             `json:"id"`
+	Kind                   *string            `json:"kind,omitempty"`
+	LastActive             *string            `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string            `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string            `json:"last_output,omitempty"`
+	Metadata               *map[string]string `json:"metadata,omitempty"`
+	Model                  *string            `json:"model,omitempty"`
+	Options                *map[string]string `json:"options,omitempty"`
+	Pool                   *string            `json:"pool,omitempty"`
+	Provider               string             `json:"provider"`
+	Reason                 *string            `json:"reason,omitempty"`
+	Rig                    *string            `json:"rig,omitempty"`
+
+	// Running Whether the session's runtime held a live agent process when this response was built, in any open state. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
 	SessionName            string                  `json:"session_name"`
 	State                  string                  `json:"state"`

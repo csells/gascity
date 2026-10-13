@@ -8455,6 +8455,7 @@
             "type": "string"
           },
           "running": {
+            "description": "Whether the session's runtime held a live agent process when this response was built, in any open state. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.",
             "type": "boolean"
           },
           "session_name": {
