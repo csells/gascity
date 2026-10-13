@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -33,12 +34,22 @@ func manualCreateBead(env *reconcilerTestEnv, age time.Duration, extra map[strin
 // the runtime was still starting. The tick's desired-state snapshot predated
 // the bead and the runtime was not up yet, so the bead looked like a dead
 // orphan. Its create had then reported the closed session as active.
+//
+// The tick also leaves the row as its create wrote it. Healing it to asleep
+// would reset its continuation (session_key, continuation_reset_pending), and
+// the create's start confirmation restores neither.
 func TestReconcileSessionBeads_ManualCreateInFlightIsNotOrphaned(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "claude", Provider: "claude"}}}
-	session := manualCreateBead(env, 2*time.Second, nil)
+	session := manualCreateBead(env, 2*time.Second, map[string]string{"session_key": "conversation-1"})
+	trace := newPoolDesiredStateTestTrace("claude")
 
-	env.reconcile([]beads.Bead{session})
+	reconcileSessionBeadsTraced(
+		context.Background(), env.city, []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, trace,
+		env.startOptions...,
+	)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -46,6 +57,25 @@ func TestReconcileSessionBeads_ManualCreateInFlightIsNotOrphaned(t *testing.T) {
 	}
 	if got.Status == "closed" {
 		t.Fatalf("session whose create is still starting it was closed: reason %q", got.Metadata["close_reason"])
+	}
+	for key, want := range map[string]string{
+		"state":                      "active",
+		"session_key":                "conversation-1",
+		"continuation_reset_pending": "",
+		"sleep_reason":               "",
+	} {
+		if got.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q as the create wrote it", key, got.Metadata[key], want)
+		}
+	}
+	kept := 0
+	for _, r := range trace.records {
+		if r.SiteCode == TraceSiteReconcilerPendingCreatePreserved && r.OutcomeCode == TraceOutcomeKeptOpen && r.Fields["manual_create_in_flight"] == true {
+			kept++
+		}
+	}
+	if kept != 1 {
+		t.Fatalf("manual-create kept-open records = %d, want 1; records=%+v", kept, trace.records)
 	}
 }
 

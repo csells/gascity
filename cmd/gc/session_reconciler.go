@@ -2383,6 +2383,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
+			// A client's create still starting its runtime keeps the row as the
+			// create wrote it. The heal below would read the not-yet-started runtime
+			// as missing and reset the continuation (session_key,
+			// started_config_hash, continuation_reset_pending), which the create's
+			// start confirmation does not restore. A preserved named session keeps
+			// its own precedence below.
+			if !preserveNamed && manualCreateStartInFlightAt(infoByID[id], clk.Now(), startupTimeout) && pendingCreateSessionStillLeasedInfo(infoByID[id], cfg, clk) {
+				template := normalizedSessionTemplateInfo(infoByID[id], cfg)
+				if template == "" {
+					template = infoByID[id].Template
+				}
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreatePreserved, TraceReasonPendingCreate, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+						"pending_create_claim":    strings.TrimSpace(infoByID[id].PendingCreateClaimMetadata),
+						"manual_create_in_flight": true,
+						"provider_alive":          providerAlive,
+						"state":                   infoByID[id].MetadataState,
+					})
+				}
+				continue
+			}
 			// Heal state using provider liveness, not agent membership.
 			// rollbackAvailable mirrors the rollback gate at line ~639: when
 			// storeQueryPartial=true the formal rollback is deferred, so the
