@@ -113,12 +113,16 @@ type approvalOption struct {
 }
 
 // parseApprovalPrompt parses the tmux pane text for a live Claude Code
-// approval prompt. It returns nil unless the pane ends with an approval
-// question followed only by a well-formed numbered menu (and the optional
-// "Esc to cancel" footer): a menu that has scrolled above the composer is
-// history, and conversational text is not a prompt.
+// approval prompt or Codex approval overlay (see parseCodexApprovalOverlay).
+// It returns nil unless the pane ends with an approval question followed only
+// by a well-formed numbered menu (and the optional "Esc to cancel" footer): a
+// menu that has scrolled above the composer is history, and conversational
+// text is not a prompt.
 func parseApprovalPrompt(paneText string) *parsedApproval {
 	lines := strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")
+	if approval := parseCodexApprovalOverlay(lines); approval != nil {
+		return approval
+	}
 
 	end := len(lines)
 	for end > 0 {
@@ -463,7 +467,9 @@ func truncateApprovalInput(s string) string {
 }
 
 // approvalOptionKey returns the keystroke that selects the menu option for
-// action, chosen by label: "approve" is the option labeled "Yes", "deny" the
+// action, chosen by label: "approve" is the option labeled "Yes" (Codex: "Yes,
+// proceed", "Yes, just this once" or "Yes, grant these permissions for this
+// turn"), "deny" the
 // one labeled "No…", "approve_always" the "Yes, and don't ask again …" /
 // "Yes, and always allow …" option, and "approve_accept_edits" the option
 // that switches to accept-edits mode. Unless exactly one option matches, it
@@ -473,7 +479,13 @@ func approvalOptionKey(approval *parsedApproval, action string) (string, error) 
 	var match func(label string) bool
 	switch action {
 	case "approve":
-		match = func(label string) bool { return label == "yes" }
+		match = func(label string) bool {
+			switch label {
+			case "yes", "yes, proceed", "yes, just this once", "yes, grant these permissions for this turn":
+				return true
+			}
+			return false
+		}
 	case "approve_always":
 		match = func(label string) bool {
 			return strings.HasPrefix(label, "yes, and don't ask again") ||
@@ -596,7 +608,8 @@ func (d *approvalDedup) clear(session string) {
 // InteractionProvider implementation
 // ---------------------------------------------------------------------------
 
-// Pending checks the tmux pane for an active Claude Code approval prompt.
+// Pending checks the tmux pane for an active Claude Code approval prompt or
+// Codex approval overlay.
 // Returns nil with no error if no approval is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	paneText, err := t.CapturePane(name, 40)
