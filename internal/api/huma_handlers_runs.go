@@ -362,6 +362,10 @@ type cancelRunResult struct {
 // close: it runs AFTER the root reaches a terminal state by contract, and its
 // pass condition may read ROOT_OUTCOME, which this cancel's own close just
 // stamped — force-closing it unexecuted would strand the resources it releases.
+// The wind-down reaches drain item workflows nested under the run at any depth
+// (sourceworkflow.NestedDrainItemRoots): each is its own root, linked to the run
+// only through gc.drain_control_id, so a sweep of the run's own members left
+// them open and their steps claimable after the run reported canceled.
 // Any store read/write failure is returned so the caller reports a 5xx rather
 // than a phantom success.
 func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
@@ -379,22 +383,28 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 			if isClosedStatus(root.Status) {
 				continue // already terminal — nothing to wind down
 			}
-			exclude, err := molecule.TeardownTailExclusion(info.store, root.ID)
+			// Nested drain item workflows first, deepest first, the run root
+			// last: if any close fails the run root is still open, so the 5xx's
+			// retry finds the run again instead of 409ing over open nested work.
+			nested, err := sourceworkflow.NestedDrainItemRoots(info.store, root.ID)
 			if err != nil {
 				return res, err
 			}
-			n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(
-				info.store,
-				root.ID,
-				beadmeta.OutcomeCanceled,
-				runCanceledCloseReason,
-				map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
-				exclude,
-			)
-			if err != nil {
-				return res, err
+			for _, item := range nested {
+				if isClosedStatus(item.Status) {
+					continue
+				}
+				n, err := cancelWorkflowRoot(info.store, item.ID)
+				res.closed += n
+				if err != nil {
+					return res, err
+				}
 			}
+			n, err := cancelWorkflowRoot(info.store, root.ID)
 			res.closed += n
+			if err != nil {
+				return res, err
+			}
 			res.status = RunStatusCanceled
 		}
 	}
@@ -402,6 +412,26 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 		res.terminal = true
 	}
 	return res, nil
+}
+
+// cancelWorkflowRoot closes one workflow root and its open members as
+// canceled, stamping the cancel-intent marker on the root alone and sparing its
+// teardown tail. A nested drain item root is canceled exactly like the run
+// root: it is a workflow root in its own right, so its own controls read
+// gc.cancel_requested off it and its own teardown tail still runs.
+func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
+	exclude, err := molecule.TeardownTailExclusion(store, rootID)
+	if err != nil {
+		return 0, err
+	}
+	return sourceworkflow.CloseWorkflowSubtreeAsExcept(
+		store,
+		rootID,
+		beadmeta.OutcomeCanceled,
+		runCanceledCloseReason,
+		map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+		exclude,
+	)
 }
 
 // findWorkflowRoots returns the graph-workflow roots in store that match runID

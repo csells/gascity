@@ -520,6 +520,68 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	return out, nil
 }
 
+// maxNestedDrainDepth bounds NestedDrainItemRoots. Real drain nesting is a
+// handful of levels deep, so a deeper chain is a corrupt or cyclic link.
+const maxNestedDrainDepth = 16
+
+// NestedDrainItemRoots returns the drain item workflow roots nested under the
+// workflow rooted at rootID, at every depth, closed ones included, deepest
+// first. A drain item workflow is a root of its own: its steps carry ITS id in
+// gc.root_bead_id, so ListWorkflowBeads(rootID) never reaches them. Its only
+// link to the parent is gc.drain_control_id, naming a drain control that is a
+// member of the parent workflow. Deepest-first is the order a terminal sweep
+// must close them in, so an interrupted sweep leaves the outer levels open for
+// its retry to find.
+func NestedDrainItemRoots(store beads.Store, rootID string) ([]beads.Bead, error) {
+	rootID = strings.TrimSpace(rootID)
+	if store == nil || rootID == "" {
+		return nil, nil
+	}
+	reader := beads.HandlesFor(store).Live
+	var out []beads.Bead
+	seen := map[string]bool{rootID: true}
+	var walk func(id string, depth int) error
+	walk = func(id string, depth int) error {
+		if depth >= maxNestedDrainDepth {
+			return nil
+		}
+		members, err := ListWorkflowBeads(store, id)
+		if err != nil {
+			return err
+		}
+		for _, member := range members {
+			if member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+				continue
+			}
+			items, err := reader.List(beads.ListQuery{
+				IncludeClosed: true,
+				Metadata:      map[string]string{beadmeta.DrainControlIDMetadataKey: member.ID},
+			})
+			if err != nil {
+				return err
+			}
+			slices.SortFunc(items, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+			for _, item := range items {
+				// The unit convoys a drain creates carry the same link; only
+				// workflow roots are nested runs.
+				if !IsWorkflowRoot(item) || seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+				if err := walk(item.ID, depth+1); err != nil {
+					return err
+				}
+				out = append(out, item)
+			}
+		}
+		return nil
+	}
+	if err := walk(rootID, 0); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CloseWorkflowSubtree closes the root and every open descendant of a
 // workflow, marking each gc.outcome=skipped. It closes descendants before the
 // root and honors in-batch "blocks" dependencies so strict stores can close
