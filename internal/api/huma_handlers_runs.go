@@ -84,7 +84,8 @@ type RunProjectionGraceSource interface {
 const runProjectionFreshness = "Run reads are a projection of the city event log, not a direct store read. " +
 	"A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads within about a second; " +
 	"a successful POST /runs/{run_id}/cancel is reflected before its response. " +
-	"A change another process writes straight to the bead store (a worker's `gc hook --claim` or `bd close`) reaches the log, and these reads, " +
+	"A worker's `gc hook --claim` (the claim and the hook's own follow-up writes) and `gc bd close` record their changes in the log as they land, so those also reach these reads within about a second. " +
+	"Any other change another process writes straight to the bead store (such as a `bd close` or `bd update` run without gc), or one of those changes the worker could not record, reaches the log, and these reads, " +
 	"when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). " +
 	"From then on these reads agree with GET /bead/{id}, which serves the same supervisor view."
 
