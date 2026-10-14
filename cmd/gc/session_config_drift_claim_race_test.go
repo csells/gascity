@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	goruntime "runtime"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -148,12 +151,18 @@ type claimAtDrainMarkStore struct {
 }
 
 func (s *claimAtDrainMarkStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	return s.atMark(id, kvs, func() error { return s.Store.SetMetadataBatch(id, kvs) })
+}
+
+// atMark runs write, landing the claim just before it when it is the
+// stop-pending mark and running afterMark just after.
+func (s *claimAtDrainMarkStore) atMark(id string, kvs map[string]string, write func() error) error {
 	mark := !s.fired && id == s.sessionID && kvs["state"] == "draining"
 	if mark {
 		s.fired = true
 		s.claim()
 	}
-	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+	if err := write(); err != nil {
 		return err
 	}
 	if mark && s.afterMark != nil {
@@ -218,7 +227,9 @@ func TestConfigDriftDrainAck_AbandonedWhenClaimLandsDuringStopPendingMark(t *tes
 // TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter pins the
 // revert's fence: it lands only on the exact stop-pending row the arm wrote. A
 // writer that moved the row after the mark (here a different drain's reason)
-// keeps its state.
+// keeps its state. The store writes nothing conditionally, so this is the half
+// of the fence that holds there too: the other writer landed before the
+// revert's read, which sees it and backs off.
 func TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter(t *testing.T) {
 	const otherReason = "other-drain"
 	env, session := configDriftDrainAckWithClaimAtMark(t, func(env *reconcilerTestEnv, id string) {
@@ -227,6 +238,9 @@ func TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter(t *testi
 			t.Errorf("SetMetadata(state_reason): %v", err)
 		}
 	})
+	if w, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: env.store}); err != nil || w != nil {
+		t.Fatalf("ResolveConditionalWriter = %v, %v; want no conditional writer", w, err)
+	}
 	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, newDrainOps(env.sp))
 	env.stops.wait(-1)
 	got, err := env.store.Get(session.ID)
@@ -235,5 +249,151 @@ func TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter(t *testi
 	}
 	if got.Metadata["state"] != "draining" || got.Metadata["state_reason"] != otherReason {
 		t.Fatalf("revert overwrote another writer: state=%q state_reason=%q, want draining/%s", got.Metadata["state"], got.Metadata["state_reason"], otherReason)
+	}
+}
+
+// revertWindowStore is claimAtDrainMarkStore over a MemStore stamped with a
+// conditional_writes mode, with a writer injected into the revert's
+// read-to-write window: the first read of the session row that the revert's
+// Commit makes returns the row as read and then runs inWindow, before Commit
+// writes. It is a mode-sourced wrapper, so the MemStore's stamp decides
+// whether Commit writes conditionally, and the claim lands at the mark
+// whichever way the mark is written.
+type revertWindowStore struct {
+	*claimAtDrainMarkStore
+	mem       *beads.MemStore
+	windowRan bool
+	inWindow  func()
+}
+
+func (s *revertWindowStore) Get(id string) (beads.Bead, error) {
+	b, err := s.claimAtDrainMarkStore.Get(id)
+	if err == nil && !s.windowRan && id == s.sessionID && readByRevertCommit() {
+		s.windowRan = true
+		s.inWindow()
+	}
+	return b, err
+}
+
+// readByRevertCommit reports whether the caller is the revert's Commit, as
+// distinct from the other reads of the row around the mark (the runtime
+// lease's release among them).
+func readByRevertCommit() bool {
+	pcs := make([]uintptr, 64)
+	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(2, pcs)])
+	var commit bool
+	for {
+		f, more := frames.Next()
+		switch {
+		case strings.HasSuffix(f.Function, "/internal/session.(*Store).Commit"):
+			commit = true
+		case strings.HasSuffix(f.Function, ".abandonConfigDriftStopPendingOnClaim"):
+			return commit
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+func (s *revertWindowStore) ConditionalWritesModeSource() beads.Store { return s.mem }
+
+func (s *revertWindowStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	return s.atMark(id, opts.Metadata, func() error { return s.mem.UpdateIfMatch(id, rev, opts) })
+}
+
+func (s *revertWindowStore) CloseIfMatch(id string, rev int64) error {
+	return s.mem.CloseIfMatch(id, rev)
+}
+
+func (s *revertWindowStore) DeleteIfMatch(id string, rev int64) error {
+	return s.mem.DeleteIfMatch(id, rev)
+}
+
+func (s *revertWindowStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	return s.mem.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// configDriftRevertWindow is configDriftDrainAckWithClaimAtMark over a store
+// stamped with mode, where another drain moves the row's state_reason to
+// otherReason inside the revert's read-to-write window.
+func configDriftRevertWindow(t *testing.T, mode gate.Mode, otherReason string) (*reconcilerTestEnv, beads.Bead, *revertWindowStore) {
+	t.Helper()
+	env, session := configDriftDrainAckWithClaimAtMark(t, nil)
+	claim := env.store.(*claimAtDrainMarkStore)
+	mem, ok := claim.Store.(*beads.MemStore)
+	if !ok {
+		t.Fatalf("store under the claim hook = %T, want *beads.MemStore", claim.Store)
+	}
+	if err := beads.StampOpenedStore(mem, "MemStore", mode, nil, nil); err != nil {
+		t.Fatalf("StampOpenedStore(%s): %v", mode, err)
+	}
+	w := &revertWindowStore{claimAtDrainMarkStore: claim, mem: mem}
+	w.inWindow = func() {
+		if err := mem.SetMetadata(session.ID, "state_reason", otherReason); err != nil {
+			t.Errorf("SetMetadata(state_reason): %v", err)
+		}
+	}
+	env.store = w
+	return env, session, w
+}
+
+// TestConfigDriftDrainAck_RevertWithoutConditionalWritesCanOverwriteInWindow
+// pins a KNOWN LIMITATION, not desired behavior. With conditional_writes off,
+// Commit reads the row, matches it and writes it unfenced, so a writer that
+// lands between the revert's read and its write is overwritten: here another
+// drain's state_reason is replaced by the row's pre-mark lifecycle fields and
+// the config-drift drain is abandoned as if the row were still its own. A
+// writer that lands before the read is refused
+// (TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter), and
+// the same window on a store with conditional writes is refused
+// (TestConfigDriftDrainAck_RevertWithConditionalWritesRefusesWriterInWindow).
+// If this test fails because the other writer's state survives, the window has
+// been closed on this store kind: turn it into a guard.
+func TestConfigDriftDrainAck_RevertWithoutConditionalWritesCanOverwriteInWindow(t *testing.T) {
+	const otherReason = "other-drain"
+	env, session, w := configDriftRevertWindow(t, gate.Off, otherReason)
+	if cw, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: env.store}); err != nil || cw != nil {
+		t.Fatalf("ResolveConditionalWriter = %v, %v; want no conditional writer", cw, err)
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, newDrainOps(env.sp))
+	env.stops.wait(-1)
+	if !w.windowRan {
+		t.Fatalf("the revert's Commit never read the session row; the window writer never ran\nstderr=%s", env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Metadata["state_reason"] == otherReason || got.Metadata["state"] == "draining" {
+		t.Fatalf("state=%q state_reason=%q: the window writer's state survived; the boundary this test pins has moved", got.Metadata["state"], got.Metadata["state_reason"])
+	}
+	assertConfigDriftDrainAbandoned(t, env, session)
+}
+
+// TestConfigDriftDrainAck_RevertWithConditionalWritesRefusesWriterInWindow is
+// the same window on a store with conditional writes: the revert's write is
+// fenced at its read's revision, loses to the other writer, re-reads the
+// moved row and backs off, leaving the other drain's state in place.
+func TestConfigDriftDrainAck_RevertWithConditionalWritesRefusesWriterInWindow(t *testing.T) {
+	const otherReason = "other-drain"
+	env, session, w := configDriftRevertWindow(t, gate.Require, otherReason)
+	if cw, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: env.store}); err != nil || cw == nil {
+		t.Fatalf("ResolveConditionalWriter = %v, %v; want a conditional writer", cw, err)
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, newDrainOps(env.sp))
+	env.stops.wait(-1)
+	if !w.windowRan {
+		t.Fatalf("the revert's Commit never read the session row; the window writer never ran\nstderr=%s", env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Metadata["state"] != "draining" || got.Metadata["state_reason"] != otherReason {
+		t.Fatalf("revert overwrote the window writer: state=%q state_reason=%q, want draining/%s\nstderr=%s", got.Metadata["state"], got.Metadata["state_reason"], otherReason, env.stderr.String())
+	}
+	if !strings.Contains(env.stderr.String(), "could not revert the mark (moved") {
+		t.Errorf("stderr does not report the refused revert as moved:\n%s", env.stderr.String())
 	}
 }
