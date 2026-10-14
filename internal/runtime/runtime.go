@@ -121,6 +121,13 @@ var ErrSessionNotFound = errors.New("session not found")
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
+// ErrSessionBusy reports that a nudge was deferred, not delivered: the session
+// was still running a turn when the provider's wait for idle ran out, and the
+// provider's submit keys would have interrupted that turn. Nothing was typed
+// into the session. Callers must treat it as "try later": keep a queued nudge
+// queued and do not count the attempt against a delivery cap.
+var ErrSessionBusy = errors.New("nudge deferred: session is busy")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".

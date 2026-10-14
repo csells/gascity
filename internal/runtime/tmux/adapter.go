@@ -789,7 +789,10 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // Nudge sends a message to the named session to wake or redirect the agent.
 // By default, waits for the agent to be idle before sending (wait-idle mode)
 // to avoid interrupting active tool calls. If the agent doesn't become idle
-// within NudgeIdleTimeout, sends immediately as a fallback.
+// within NudgeIdleTimeout, sends immediately as a fallback — unless the
+// provider's submit keys would interrupt the turn still running there (Codex's
+// Escape-led submit): then nothing is typed and the error wraps
+// [runtime.ErrSessionBusy], so the caller defers instead of aborting the turn.
 // Delegates to [Tmux.NudgeSession] which handles per-session locking,
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
@@ -820,6 +823,11 @@ func (p *Provider) nudge(ctx context.Context, name string, content []runtime.Con
 			// so this never disturbs a genuinely busy pane.
 			p.tm.dismissModelSwitchModalIfPresentCtx(ctx, name)
 		}
+	}
+	// Sending anyway is safe only where the submit keys cannot cut the turn
+	// short. With the wait disabled the same look is taken once.
+	if err := p.tm.refuseInterruptingSubmitWhileBusy(name); err != nil {
+		return err
 	}
 	return p.nudgeNow(ctx, name, content)
 }

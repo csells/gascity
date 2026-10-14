@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -923,5 +924,71 @@ func TestNudgeStalledPoolClaims_BusySlotIsNotNudged(t *testing.T) {
 				t.Fatalf("Nudge calls = %d, want the quiet slot nudged", got)
 			}
 		})
+	}
+}
+
+// busyAtDeliveryProvider is a runtime whose session looks quiet to every
+// look the backstop takes but has gone busy by the time the nudge is typed:
+// while busy is set its Nudge defers with runtime.ErrSessionBusy, typing
+// nothing, the way the tmux provider answers a Codex pane still running a
+// turn when its wait for idle runs out.
+type busyAtDeliveryProvider struct {
+	*runtime.Fake
+	busy     bool
+	deferred int
+}
+
+func (p *busyAtDeliveryProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if p.busy {
+		p.deferred++
+		return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+	}
+	return p.Fake.Nudge(name, content)
+}
+
+// Kills a deferred delivery spending the slot's bounded attempts (oct14b
+// follow-up): the busy look passes, the attempt is reserved, and then the
+// worker starts a turn before the nudge is typed. The runtime defers instead
+// of interrupting it, so the reservation is refunded — count and time back
+// to what they were — and the slot is neither drained early nor denied its
+// nudges; the next quiet tick delivers attempt 1.
+func TestNudgeStalledPoolClaims_BusyAtDeliveryRefundsTheAttempt(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	s := staleSnapshotClaimSession(base)
+	s.Metadata["instance_token"] = "tok-1"
+	s.Metadata[idleClaimNudgeTokenKey] = "tok-1"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	sp := &busyAtDeliveryProvider{Fake: quietClaimFake(t, now), busy: true}
+	drains := &drainRecorder{}
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	var out bytes.Buffer
+
+	ticks := idleClaimNudgeMaxAttempts + 2
+	for tick := 0; tick < ticks; tick++ {
+		at := now.Add(time.Duration(tick) * (idleClaimNudgeBackoff + time.Second))
+		sp.SetActivity("session-a", at.Add(-time.Hour))
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, at, liveClaimDrain(store, drains.request), &out)
+	}
+	if sp.deferred != ticks || sp.CountCalls("Nudge", "session-a") != 0 {
+		t.Fatalf("deferred %d delivered %d, want all %d ticks deferred and nothing delivered (log %q)", sp.deferred, sp.CountCalls("Nudge", "session-a"), ticks, out.String())
+	}
+	got := mustGetTestBead(t, store, s.ID)
+	if got.Metadata[idleClaimNudgeCountKey] != "0" || got.Metadata[idleClaimNudgeAtKey] != base.Format(time.RFC3339) {
+		t.Fatalf("marker count %q at %q, want the reservation refunded to 0 at %s", got.Metadata[idleClaimNudgeCountKey], got.Metadata[idleClaimNudgeAtKey], base.Format(time.RFC3339))
+	}
+	if len(drains.ids) != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+		t.Fatalf("drains %v latch %q, want no drain for a slot whose nudges were only deferred", drains.ids, got.Metadata[idleClaimNudgeStalledKey])
+	}
+	if !strings.Contains(out.String(), "deferred the nudge for work-a") {
+		t.Fatalf("log %q, want the deferral logged", out.String())
+	}
+
+	sp.busy = false
+	later := now.Add(time.Duration(ticks) * (idleClaimNudgeBackoff + time.Second))
+	sp.SetActivity("session-a", later.Add(-time.Hour))
+	nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, later, liveClaimDrain(store, drains.request), &out)
+	if got := mustGetTestBead(t, store, s.ID).Metadata[idleClaimNudgeCountKey]; sp.CountCalls("Nudge", "session-a") != 1 || got != "1" {
+		t.Fatalf("delivered %d count %q, want attempt 1 delivered once the session is quiet", sp.CountCalls("Nudge", "session-a"), got)
 	}
 }
