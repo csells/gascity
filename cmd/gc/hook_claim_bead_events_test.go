@@ -375,13 +375,18 @@ func TestHookClaimAnnouncementFoldsIdempotentlyWithSupervisorAnnouncement(t *tes
 }
 
 // projectedForm is a projected bead as the run views serialize it, with its
-// timestamps cut to whole seconds: bd stamps whole seconds, so the hook's
-// snapshot (read through BdStore) carries them, while the test's supervisor
-// cache reads its MemStore directly, which does not.
+// creation time cut to whole seconds (bd stamps whole seconds, so the hook's
+// snapshot, read through BdStore, carries them, while the test's supervisor
+// cache reads its MemStore directly, which does not) and its update time left
+// out. updated_at is the write clock, not claim state: the hook derives its
+// snapshot onto the claim's CAS readback, which precedes its gc.claimed_at
+// stamp write, so whenever the stamp lands in the next wall-clock second the
+// hook's updated_at trails the supervisor's by one. The fold's idempotence is
+// about status, assignee, metadata and run membership, all still compared.
 func projectedForm(t *testing.T, b beads.Bead) string {
 	t.Helper()
 	b.CreatedAt = b.CreatedAt.UTC().Truncate(time.Second)
-	b.UpdatedAt = b.UpdatedAt.UTC().Truncate(time.Second)
+	b.UpdatedAt = time.Time{}
 	out, err := json.Marshal(b)
 	if err != nil {
 		t.Fatal(err)
