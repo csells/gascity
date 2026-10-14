@@ -269,11 +269,23 @@ func configDriftSeatHasLiveWork(sw *SeatWork, info sessionpkg.Info) (bool, error
 // then marks the row draining, and `gc hook --claim` refuses a seat whose row
 // reads draining. A claim whose fence read the row before the mark landed can
 // still commit after the arm's pre-check, so the arm re-reads the seat's work
-// AFTER the mark. If work is there, it reverts the mark (fenced on the
-// stop-pending decision, so it lands only on the row this arm just wrote and
-// never over another writer's state, a different drain's included), cancels
-// the config-drift drain and its ack, and reports true: the caller queues no
-// stop.
+// AFTER the mark. If work is there, it reverts the mark, cancels the
+// config-drift drain and its ack, and reports true: the caller queues no stop.
+//
+// The revert is committed on the stop-pending decision (Store.Commit at
+// FactsLegacyDrainStop): it writes only if a fresh read of the row still
+// carries the state, state_reason, generation and instance_token the mark
+// left. How far that protects another writer's state (a different drain's
+// included) depends on the store:
+//   - With conditional writes, the write is fenced at the revision of that
+//     read, so the revert never overwrites another writer's state.
+//   - Without them (conditional_writes off, or auto over a store that cannot
+//     write conditionally), the read and the write are separate operations.
+//     A competing write the read sees makes the revert back off, but one that
+//     lands after the read and before the revert's write is overwritten with
+//     prior's lifecycle fields, and the drain is abandoned as if the row were
+//     still this arm's
+//     (TestConfigDriftDrainAck_RevertWithoutConditionalWritesCanOverwriteInWindow).
 //
 // With the claim's own post-claim re-read of the row
 // (writeHookClaimWorkResultForBead) this is a write-then-read on both sides.

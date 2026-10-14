@@ -503,7 +503,9 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 // whose stop was never queued, restoring the lifecycle fields prior — the row
 // as read before the stop-pending mark — carried. The caller commits it
 // fenced on the stop-pending decision, so it lands only on the row that mark
-// produced and never over a later writer's state.
+// produced and never over a later writer's state that its read sees; only a
+// store with conditional writes also refuses a writer that lands between that
+// read and the write (Store.Commit).
 func RevertDrainAckStopPendingPatch(prior Info) MetadataPatch {
 	return MetadataPatch{
 		"state":                     prior.MetadataState,
