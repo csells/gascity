@@ -58,6 +58,15 @@ func (p *codexPaneSessionProvider) recordTurnAborted() {
 	if _, err := f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n"); err != nil {
 		p.t.Fatalf("writing rollout: %v", err)
 	}
+	// Stamp the write time explicitly. Linux filesystems take file times from
+	// the kernel's coarse clock, which can trail time.Now() by a few
+	// milliseconds, so a write made microseconds after the interrupt began can
+	// read as older than it. Real Codex writes this marker long after GC's
+	// interrupt keys, well clear of that granularity.
+	now := time.Now()
+	if err := os.Chtimes(rollout, now, now); err != nil {
+		p.t.Fatalf("stamping rollout: %v", err)
+	}
 }
 
 func (p *codexPaneSessionProvider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
