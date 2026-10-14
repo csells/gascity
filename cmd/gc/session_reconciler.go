@@ -3320,6 +3320,38 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
+						// Re-check the live-assigned-work guard that gated the drift
+						// drain's begin, here at the commit point. The begin read an idle
+						// session, but the drain then spends ticks (begin, deferred ack,
+						// this stop) with the session row still awake, and the claim fence
+						// in `gc hook --claim` refuses only a row already marked draining.
+						// A claim that landed in that window would otherwise be stopped
+						// mid-work and re-served only after a restart. Abandon the drain
+						// instead: the drift check re-detects the drift each tick and
+						// defers it until the work completes. A failed probe fails closed
+						// (keep the session running), the verdict the drift check's own
+						// guard reaches.
+						if alive {
+							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(sw, infoByID[id])
+							if assignedErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain-ack stop for %s: %v\n", name, assignedErr) //nolint:errcheck
+								hasAssignedWork = true
+							}
+							if hasAssignedWork {
+								drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
+								if !drainCancelled {
+									_ = clearReconcilerDrainAckMetadata(sp, name)
+								}
+								logDrainSkip(dt, stdout, id, fmt.Sprintf("Abandoning config-drift drain for '%s': live assigned work found", name), clk.Now())
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDrift, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
+										"active_reason":  "live_assigned_work",
+										"drain_canceled": drainCancelled,
+									})
+								}
+								continue
+							}
+						}
 					}
 					// Only a live runtime can raise an interaction: a dead or zombie
 					// target's failed probe must not cancel the drain it acked.
@@ -3975,9 +4007,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 							if hasAssignedWork {
+								// Abandon a config-drift drain begun on an earlier tick,
+								// before this work was claimed: skipping only the begin
+								// would let the drain scan publish its ack and the
+								// drain-ack arm stop the session mid-claim.
+								drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
-										"active_reason": "live_assigned_work",
+										"active_reason":  "live_assigned_work",
+										"drain_canceled": drainCancelled,
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
