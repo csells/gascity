@@ -108,6 +108,42 @@ func nudgeSubmitKeySequenceForFamily(family string) []string {
 	return defaultNudgeSubmitKeySequence
 }
 
+// submitSequenceInterrupts reports whether a submit key sequence carries a key
+// that interrupts a running turn when it reaches a busy pane: Escape (Codex
+// reads it as cancel, which is why its submit leads with it) or Ctrl-C. Enter
+// alone does not; a busy Claude pane queues the message instead.
+func submitSequenceInterrupts(keys []string) bool {
+	for _, key := range keys {
+		switch key {
+		case "Escape", "Esc", "C-c":
+			return true
+		}
+	}
+	return false
+}
+
+// refuseInterruptingSubmitWhileBusy returns an error wrapping
+// runtime.ErrSessionBusy when session's agent pane shows a running turn and its
+// provider's submit sequence would interrupt that turn (see
+// submitSequenceInterrupts). It sends no keys. A pane that cannot be resolved
+// or read returns nil: the delivery that follows takes its own looks and
+// refuses a pane it cannot read.
+func (t *Tmux) refuseInterruptingSubmitWhileBusy(session string) error {
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return nil
+	}
+	keys := t.nudgeSubmitKeySequence(target)
+	if !submitSequenceInterrupts(keys) {
+		return nil
+	}
+	if busy, err := t.paneBusy(target); err != nil || !busy {
+		return nil
+	}
+	return fmt.Errorf("%w: session %q is still running a turn and its submit keys (%s) would interrupt it",
+		runtime.ErrSessionBusy, session, strings.Join(keys, " "))
+}
+
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
 type Config struct {

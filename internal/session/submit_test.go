@@ -2351,6 +2351,52 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	}
 }
 
+// busyNudgeProvider defers every wait-idle Nudge with runtime.ErrSessionBusy,
+// typing nothing, the way the tmux provider answers a Codex pane still running
+// a turn when its wait for idle runs out.
+type busyNudgeProvider struct{ *runtime.Fake }
+
+func (p *busyNudgeProvider) Nudge(name string, _ []runtime.ContentBlock) error {
+	return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+}
+
+// TestSendQueuesWhenTheRuntimeDefersABusySession: a default send the runtime
+// defers rather than interrupt a running turn is queued for later delivery
+// (queued, deferred), not reported as a failure that loses it; the live-only
+// send, whose caller is the queue itself, reports the deferral so the queue
+// keeps its item.
+func TestSendQueuesWhenTheRuntimeDefersABusySession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &busyNudgeProvider{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	defer func() { startSessionSubmitPoller = origPoller }()
+	hints := runtime.Config{WorkDir: info.WorkDir}
+
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorBackground), info.ID, "while you work", BuildResumeCommand(info), hints)
+	if err != nil || !out.Queued || !out.Deferred {
+		t.Fatalf("Send = %+v, %v; want queued and deferred", out, err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "while you work" {
+		t.Fatalf("pending %+v, want the message queued for the session", state.Pending)
+	}
+
+	delivered, err := mgr.SendLiveOnly(context.Background(), info.ID, "x", nil)
+	if delivered || !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("SendLiveOnly = %t, %v; want undelivered with runtime.ErrSessionBusy", delivered, err)
+	}
+}
+
 // TestSendPathsQueueOverACrashedAgent (mc-wdjni): every send path, not only
 // Submit's default, holds text off a pane whose agent is dead: Send and
 // SendImmediate queue it (queued, deferred), the live-only sends and the

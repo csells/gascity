@@ -1289,7 +1289,9 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 
 // sendLocked delivers message, starting or resuming the runtime as by
 // allows; a row it may not resume, or whose agent is dead in a pane still
-// up, gets the message queued (reports true).
+// up, gets the message queued (reports true). So does a live session the
+// runtime would not type into because it is running a turn the submit keys
+// would interrupt (runtime.ErrSessionBusy): the queue delivers it later.
 func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); err != nil {
 		if !errors.Is(err, ErrResumeHeld) && !errors.Is(err, ErrAgentDead) {
@@ -1305,6 +1307,9 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 		return false, err
 	}
 	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		if errors.Is(err, runtime.ErrSessionBusy) {
+			return true, m.enqueueDeferredSubmitLocked(b, sessName, message)
+		}
 		return false, err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
