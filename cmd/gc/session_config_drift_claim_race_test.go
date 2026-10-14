@@ -133,3 +133,107 @@ func TestConfigDriftDrainAck_StillStopsIdleSession(t *testing.T) {
 			got.Metadata["state"], got.Metadata["state_reason"], env.stdout.String(), env.stderr.String())
 	}
 }
+
+// claimAtDrainMarkStore lands the worker's claim at the moment the drain-ack
+// arm writes its stop-pending mark: after the arm's pre-mark work check read an
+// idle seat, and before the draining row the claim fence reads is visible. It
+// is the interleaving a pre-check alone cannot see. afterMark, when set, runs
+// right after the mark landed, as another writer would.
+type claimAtDrainMarkStore struct {
+	beads.Store
+	sessionID string
+	claim     func()
+	afterMark func()
+	fired     bool
+}
+
+func (s *claimAtDrainMarkStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	mark := !s.fired && id == s.sessionID && kvs["state"] == "draining"
+	if mark {
+		s.fired = true
+		s.claim()
+	}
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	if mark && s.afterMark != nil {
+		s.afterMark()
+	}
+	return nil
+}
+
+// configDriftDrainAckWithClaimAtMark is configDriftDrainInFlight with an acked
+// drain on an idle seat whose claim lands during the stop-pending mark.
+func configDriftDrainAckWithClaimAtMark(t *testing.T, afterMark func(env *reconcilerTestEnv, id string)) (*reconcilerTestEnv, beads.Bead) {
+	t.Helper()
+	env, session := configDriftDrainInFlight(t, true)
+	work, err := env.store.List(beads.ListQuery{Assignee: session.ID})
+	if err != nil {
+		t.Fatalf("List(work): %v", err)
+	}
+	for _, b := range work {
+		if err := env.store.Close(b.ID); err != nil {
+			t.Fatalf("Close(%s): %v", b.ID, err)
+		}
+	}
+	inner := env.store
+	wrapped := &claimAtDrainMarkStore{Store: inner, sessionID: session.ID}
+	wrapped.claim = func() {
+		if _, err := inner.Create(beads.Bead{Title: "claimed at mark", Type: "task", Status: "in_progress", Assignee: session.ID}); err != nil {
+			t.Errorf("Create(claimed work): %v", err)
+		}
+	}
+	if afterMark != nil {
+		wrapped.afterMark = func() { afterMark(env, session.ID) }
+	}
+	env.store = wrapped
+	return env, session
+}
+
+// TestConfigDriftDrainAck_AbandonedWhenClaimLandsDuringStopPendingMark closes
+// the last window: the claim's fence read the row before the mark and its CAS
+// landed after the arm's pre-check. The arm's post-mark re-read must find the
+// claim, revert the mark and queue no stop.
+func TestConfigDriftDrainAck_AbandonedWhenClaimLandsDuringStopPendingMark(t *testing.T) {
+	env, session := configDriftDrainAckWithClaimAtMark(t, nil)
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, newDrainOps(env.sp))
+	env.stops.wait(-1)
+	assertConfigDriftDrainAbandoned(t, env, session)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Metadata["state_reason"] == "drain-ack-stop-pending" || got.Metadata["drain_at"] != "" {
+		t.Errorf("stop-pending mark not reverted: state=%q state_reason=%q drain_at=%q", got.Metadata["state"], got.Metadata["state_reason"], got.Metadata["drain_at"])
+	}
+	work, err := env.store.List(beads.ListQuery{Assignee: session.ID})
+	if err != nil {
+		t.Fatalf("List(work): %v", err)
+	}
+	if len(work) != 1 || work[0].Status == "closed" {
+		t.Errorf("claimed work assigned to the session = %+v, want the one claim kept", work)
+	}
+}
+
+// TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter pins the
+// revert's fence: it lands only on the exact stop-pending row the arm wrote. A
+// writer that moved the row after the mark (here a different drain's reason)
+// keeps its state.
+func TestConfigDriftDrainAck_PostMarkRevertNeverOverwritesAnotherWriter(t *testing.T) {
+	const otherReason = "other-drain"
+	env, session := configDriftDrainAckWithClaimAtMark(t, func(env *reconcilerTestEnv, id string) {
+		inner := env.store.(*claimAtDrainMarkStore).Store
+		if err := inner.SetMetadata(id, "state_reason", otherReason); err != nil {
+			t.Errorf("SetMetadata(state_reason): %v", err)
+		}
+	})
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, newDrainOps(env.sp))
+	env.stops.wait(-1)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Metadata["state"] != "draining" || got.Metadata["state_reason"] != otherReason {
+		t.Fatalf("revert overwrote another writer: state=%q state_reason=%q, want draining/%s", got.Metadata["state"], got.Metadata["state_reason"], otherReason)
+	}
+}
