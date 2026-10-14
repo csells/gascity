@@ -27,17 +27,17 @@ package main
 //
 // # When the announcement runs
 //
-// Not inside the write. The claim tier decides whether a landed claim is kept
-// (claimLandingWindowSpent) after the CAS returns, and the ready tier re-stamps
-// before that decision; a stale-lease reclaim runs before the claim's start
-// fence (claimWindowSpent). Store reads made there would spend the window the
-// fences measure, and on a slow store could turn a claim that landed in time
-// into a straddle unwind. So each write only NOTES what it changed, and the
-// notes are announced together: by writeHookClaimWorkResultForBead once the
-// claim is kept and stamped, before its result line is written (so the worker
-// cannot close the step before the claim is in the log), and by claimHookWork
-// on the way out for whatever is left (a release, a reclaim, a claim that
-// stopped on an error).
+// Not inside the write. The claim tier stamps the instant the CAS returns and
+// decides from it whether the landed claim is kept (claimLandingWindowSpent),
+// and a stale-lease reclaim runs before the claim's start fence
+// (claimWindowSpent). Store reads made inside those writes would spend the
+// window the fences measure, and on a slow store could turn a claim that
+// landed in time into a straddle unwind. So each write only NOTES what it
+// changed, and the notes are announced together: by
+// writeHookClaimWorkResultForBead once the claim is kept and stamped, before
+// its result line is written (so the worker cannot close the step before the
+// claim is in the log), and by claimHookWork on the way out for whatever is
+// left (a release, a reclaim, a claim that stopped on an error).
 //
 // A note carries the post-write row when it can be derived from rows already in
 // hand: the CAS's canonical readback, updated by the stamp's metadata patch or
