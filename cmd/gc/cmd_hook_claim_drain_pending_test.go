@@ -396,7 +396,7 @@ func TestHookClaimReleasesAClaimThatLandedAfterTheDrainMark(t *testing.T) {
 	var releaseCalls []string
 	var stepStarted int
 	ops := e.ops()
-	ops.DrainPending = func(sessionID string) (bool, error) {
+	ops.DrainPending = func(_ string) (bool, error) {
 		v := verdicts[min(asked, len(verdicts)-1)]
 		asked++
 		return v, nil

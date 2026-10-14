@@ -153,15 +153,18 @@ func TestBeadPolicyStoreForwardsTheBatchedChildrenRead(t *testing.T) {
 	}
 }
 
-// childrenTierSpy records the options each forwarded ChildrenOfAny carries.
+// childrenTierSpy records the options each forwarded ChildrenOfAny carries
+// and answers with rows and err.
 type childrenTierSpy struct {
 	beads.Store
 	opts [][]beads.QueryOpt
+	rows []beads.Bead
+	err  error
 }
 
 func (s *childrenTierSpy) ChildrenOfAny(_ []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	s.opts = append(s.opts, opts)
-	return nil, nil
+	return s.rows, s.err
 }
 
 // TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier pins that the forwarded
