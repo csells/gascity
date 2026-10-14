@@ -53,8 +53,10 @@ func TestGcBdCloseAnnouncesTheCloseToRunProjection(t *testing.T) {
 	}
 	for _, b := range []beads.Bead{
 		{ID: "demo-root", Title: "run", Status: "open", Type: "molecule"},
-		{ID: "demo-abc", Title: "implement", Status: "in_progress", Type: "task", Assignee: "worker-1",
-			Metadata: map[string]string{"gc.root_bead_id": "demo-root"}},
+		{
+			ID: "demo-abc", Title: "implement", Status: "in_progress", Type: "task", Assignee: "worker-1",
+			Metadata: map[string]string{"gc.root_bead_id": "demo-root"},
+		},
 	} {
 		payload, err := beads.EncodeBeadEventPayload(b)
 		if err != nil {
