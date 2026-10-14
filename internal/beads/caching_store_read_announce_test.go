@@ -89,12 +89,16 @@ func newReadAnnounceFixture(t *testing.T) *readAnnounceFixture {
 	return &readAnnounceFixture{backing: backing, cache: cache, rec: rec, root: root, step: step}
 }
 
+// readAnnounceClaimant is the worker every out-of-process claim in these tests names.
+const readAnnounceClaimant = "worker"
+
 // claimOutOfProcess claims the step in the backing directly, the way
 // `gc hook --claim` does from a one-shot process: a bd write that this cache
 // never sees and that announces nothing.
-func (f *readAnnounceFixture) claimOutOfProcess(t *testing.T, assignee string) {
+func (f *readAnnounceFixture) claimOutOfProcess(t *testing.T) {
 	t.Helper()
 	status := "in_progress"
+	assignee := readAnnounceClaimant
 	if err := f.backing.Update(f.step.ID, UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
 		t.Fatalf("out-of-process claim: %v", err)
 	}
@@ -106,8 +110,9 @@ func (f *readAnnounceFixture) markStepDirty() {
 	f.cache.mu.Unlock()
 }
 
-func requireOneClaimAnnouncement(t *testing.T, rec *readAnnounceRecorder, id, assignee string) {
+func requireOneClaimAnnouncement(t *testing.T, rec *readAnnounceRecorder, id string) {
 	t.Helper()
+	assignee := readAnnounceClaimant
 	rows := rec.forBead(id)
 	if len(rows) != 1 {
 		t.Fatalf("notifications for %s = %+v, want exactly one bead.updated carrying the claim", id, rows)
@@ -128,7 +133,7 @@ func requireOneClaimAnnouncement(t *testing.T, rec *readAnnounceRecorder, id, as
 // among them — then saw the step pending until it closed.
 func TestCachingStoreLiveListAnnouncesOutOfProcessClaimItInstalls(t *testing.T) {
 	f := newReadAnnounceFixture(t)
-	f.claimOutOfProcess(t, "worker")
+	f.claimOutOfProcess(t)
 
 	if _, err := f.cache.List(ListQuery{ParentID: f.root.ID}); err != nil {
 		t.Fatalf("List: %v", err)
@@ -140,18 +145,18 @@ func TestCachingStoreLiveListAnnouncesOutOfProcessClaimItInstalls(t *testing.T) 
 	if cached.Status != "in_progress" || cached.Assignee != "worker" {
 		t.Fatalf("cached step = status %q assignee %q, want the claim installed", cached.Status, cached.Assignee)
 	}
-	requireOneClaimAnnouncement(t, f.rec, f.step.ID, "worker")
+	requireOneClaimAnnouncement(t, f.rec, f.step.ID)
 
 	// The reconcile that follows finds nothing new: the claim is announced
 	// once, not lost and not repeated.
 	f.cache.ReconcileNowForTest()
-	requireOneClaimAnnouncement(t, f.rec, f.step.ID, "worker")
+	requireOneClaimAnnouncement(t, f.rec, f.step.ID)
 }
 
 func TestCachingStoreDirtyGetAnnouncesOutOfProcessClaimItInstalls(t *testing.T) {
 	f := newReadAnnounceFixture(t)
 	f.markStepDirty()
-	f.claimOutOfProcess(t, "worker")
+	f.claimOutOfProcess(t)
 
 	got, err := f.cache.Get(f.step.ID)
 	if err != nil {
@@ -160,15 +165,15 @@ func TestCachingStoreDirtyGetAnnouncesOutOfProcessClaimItInstalls(t *testing.T) 
 	if got.Status != "in_progress" || got.Assignee != "worker" {
 		t.Fatalf("Get = status %q assignee %q, want the backing's claim", got.Status, got.Assignee)
 	}
-	requireOneClaimAnnouncement(t, f.rec, f.step.ID, "worker")
+	requireOneClaimAnnouncement(t, f.rec, f.step.ID)
 	f.cache.ReconcileNowForTest()
-	requireOneClaimAnnouncement(t, f.rec, f.step.ID, "worker")
+	requireOneClaimAnnouncement(t, f.rec, f.step.ID)
 }
 
 func TestCachingStoreDirtyOverlayAnnouncesOutOfProcessClaimItInstalls(t *testing.T) {
 	f := newReadAnnounceFixture(t)
 	f.markStepDirty()
-	f.claimOutOfProcess(t, "worker")
+	f.claimOutOfProcess(t)
 
 	rows, err := f.cache.List(ListQuery{Metadata: map[string]string{"gc.root_bead_id": f.root.ID}})
 	if err != nil {
@@ -177,9 +182,9 @@ func TestCachingStoreDirtyOverlayAnnouncesOutOfProcessClaimItInstalls(t *testing
 	if len(rows) != 1 || rows[0].Status != "in_progress" {
 		t.Fatalf("overlay list = %+v, want the claimed step", rows)
 	}
-	requireOneClaimAnnouncement(t, f.rec, f.step.ID, "worker")
+	requireOneClaimAnnouncement(t, f.rec, f.step.ID)
 	f.cache.ReconcileNowForTest()
-	requireOneClaimAnnouncement(t, f.rec, f.step.ID, "worker")
+	requireOneClaimAnnouncement(t, f.rec, f.step.ID)
 }
 
 // Refetching a row that did not change announces nothing: the announcement
@@ -221,7 +226,7 @@ func TestCachingStoreLiveListAnnouncesOutOfProcessCloseOnlyAsClose(t *testing.T)
 // own row, and replaying the older read would move consumers backwards.
 func TestCachingStoreQueuedReadAnnouncementYieldsToLaterDifferentInstall(t *testing.T) {
 	f := newReadAnnounceFixture(t)
-	f.claimOutOfProcess(t, "worker")
+	f.claimOutOfProcess(t)
 	items, err := f.backing.List(ListQuery{ParentID: f.root.ID})
 	if err != nil {
 		t.Fatalf("backing list: %v", err)

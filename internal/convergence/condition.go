@@ -124,7 +124,7 @@ func conditionToolLinkDir(gcHome string, tools map[string]string) (string, error
 	sort.Strings(names)
 	sum := sha256.New()
 	for _, name := range names {
-		fmt.Fprintf(sum, "%s=%s\n", name, tools[name])
+		_, _ = fmt.Fprintf(sum, "%s=%s\n", name, tools[name])
 	}
 	parent := filepath.Join(gcHome, "run", "gate-tools")
 	dir := filepath.Join(parent, hex.EncodeToString(sum.Sum(nil))[:16])

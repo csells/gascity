@@ -24,7 +24,7 @@ func newCountingFakeBd() *countingFakeBd {
 
 func (f *countingFakeBd) run(dir, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, slices.Clone(args))
-	return f.FakeBd.Run(dir, name, args...)
+	return f.Run(dir, name, args...)
 }
 
 func (f *countingFakeBd) store() *beads.BdStore {
