@@ -353,11 +353,14 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 
 // legacyEphemeralPoolDemandFilterJQ selects, from the open ephemeral tier,
 // the unassigned rows routed to $target or carrying its unexpanded legacy
-// workflow run target.
+// workflow run target. A structural workflow latch is dropped whichever route
+// names it (executableWorkflowTopologyJQ) before the worker tier takes its
+// first row, so an older latch cannot displace a routed wisp step.
 func legacyEphemeralPoolDemandFilterJQ(limit int) string {
 	return legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
-			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
+			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`+
+			` | `+executableWorkflowTopologyJQ(),
 		limit,
 		true,
 	)
@@ -427,15 +430,23 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`}; `
 }
 
-// preferExecutablePoolDemandScript keeps graph-v2 workflow roots available as
-// launch fallbacks, but moves them behind executable routed work in the same
-// ready result. The claim hook consumes candidates in order; without this
-// preference an older root can be returned forever while its ready child waits
-// behind it. A malformed reader payload is preserved for the hook's existing
-// fail-open handling rather than being converted into false-empty demand.
+// preferExecutablePoolDemandScript post-filters the routed ready result in two
+// steps. First it drops every structural workflow latch
+// (executableWorkflowTopologyJQ): graph routing stamps gc.routed_to on every
+// graph.v2 root, so an expanded root can sit in this tier although no worker
+// claims it, and a tier answering with only latches would exit before the
+// later tiers and targets ran, draining the worker while the controller still
+// counts the shadowed work. Then it keeps the remaining graph-v2 workflow
+// roots, the never-expanded launch targets, available as fallbacks behind
+// executable routed work. The claim hook consumes candidates in order; without
+// that preference an older root can be returned forever while its ready child
+// waits behind it. A malformed reader payload is preserved for the hook's
+// existing fail-open handling rather than being converted into false-empty
+// demand; the claim matcher still refuses any latch it carries.
 func preferExecutablePoolDemandScript() string {
 	predicate := graphWorkflowAnchorJQPredicate()
-	preferJQ := `[.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+	preferJQ := `[.[] | ` + executableWorkflowTopologyJQ() + `]` +
+		` | [.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
 	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
