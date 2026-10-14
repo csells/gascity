@@ -36,10 +36,13 @@ type backstopPredicate interface {
 	// content resolves the text to nudge with, or "" to skip silently.
 	content(s beads.Bead) string
 
-	// revalidate checks the exact target immediately before attempt reservation
-	// and delivery. It closes the desired-state-snapshot race without treating
-	// a read failure as proof that work disappeared.
-	revalidate(target backstopTarget) backstopResolution
+	// revalidate checks the exact target, and session s (runtime name
+	// sessName), immediately before attempt reservation and delivery. It
+	// closes the desired-state-snapshot race without treating a read failure
+	// as proof that work disappeared, and it is where a predicate whose
+	// resolve does not already prove the session quiet refuses to type into a
+	// running turn (claimNudgeBusyHold): Hold spends no attempt.
+	revalidate(s beads.Bead, sessName string, target backstopTarget) backstopResolution
 
 	// observe persists the start of a new assignment's grace window.
 	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
@@ -214,7 +217,7 @@ func runNudgeBackstop(
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
-			switch pred.revalidate(target) {
+			switch pred.revalidate(*s, sessName, target) {
 			case backstopResolutionHold:
 				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
 				continue
