@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // codexTurnPane is a tmux executor that plays a codex-cli 0.162.1 pane and
@@ -38,9 +39,13 @@ import (
 type codexTurnPane struct {
 	mu sync.Mutex
 
-	session   string
-	codexHome string
-	rollout   string
+	session string
+	// rollout is the file this pane's Codex holds open once its first turn
+	// creates it. The pane serves no CODEX_HOME: Codex defaults to ~/.codex,
+	// as a stock deployment does.
+	rollout string
+	// held, when set, replaces heldRollout as the open-file lookup.
+	held func(panePID int) string
 
 	busyHiddenFor  time.Duration
 	recordAfter    time.Duration
@@ -67,13 +72,12 @@ type codexTurnPane struct {
 func newCodexTurnPane(t *testing.T, session string) *codexTurnPane {
 	t.Helper()
 	home := t.TempDir()
-	dir := filepath.Join(home, "sessions", "2026", "10", "15")
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "10", "15")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	return &codexTurnPane{
 		session:       session,
-		codexHome:     home,
 		rollout:       filepath.Join(dir, "rollout-2026-10-15T08-42-16-01a13eb9-f318-7c32-87de-d469fe118a8b.jsonl"),
 		busyHiddenFor: 300 * time.Millisecond,
 		recordAfter:   50 * time.Millisecond,
@@ -94,6 +98,53 @@ func (f *codexTurnPane) startEarlierTurn(d time.Duration) {
 		defer f.mu.Unlock()
 		if f.running && f.turnSeq == seq {
 			f.running = false
+		}
+	}))
+}
+
+// heldRollout answers the open-file lookup for the pane's process tree
+// (fakeAgentPaneRow's pane PID 4242): its rollout, once the first turn has
+// created it.
+func (f *codexTurnPane) heldRollout(panePID int) string {
+	if f.held != nil {
+		return f.held(panePID)
+	}
+	if panePID != 4242 {
+		return ""
+	}
+	if _, err := os.Stat(f.rollout); err != nil {
+		return ""
+	}
+	return f.rollout
+}
+
+// otherSessionWrites appends rows to another Codex session's rollout in the
+// same home and sessions directory, after d, and leaves that file the newest
+// there. Its mtime is set outright: the bubble's clock does not reach the
+// filesystem, and a coarse mtime could tie the two files.
+func (f *codexTurnPane) otherSessionWrites(d time.Duration, rows ...map[string]any) {
+	other := filepath.Join(filepath.Dir(f.rollout), "rollout-2026-10-15T08-42-17-01a13eba-0000-7000-8000-000000000002.jsonl")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.timers = append(f.timers, time.AfterFunc(d, func() {
+		file, err := os.OpenFile(other, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			panic(err)
+		}
+		defer file.Close() //nolint:errcheck
+		for _, row := range rows {
+			line, _ := json.Marshal(map[string]any{
+				"timestamp": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+				"type":      row["type"],
+				"payload":   row["payload"],
+			})
+			if _, err := file.Write(append(line, '\n')); err != nil {
+				panic(err)
+			}
+		}
+		newest := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(other, newest, newest); err != nil {
+			panic(err)
 		}
 	}))
 }
@@ -189,8 +240,6 @@ func (f *codexTurnPane) execute(args []string) (string, error) {
 		switch {
 		case slices.Contains(args, "GC_PROVIDER"):
 			return "GC_PROVIDER=codex", nil
-		case slices.Contains(args, "CODEX_HOME"):
-			return "CODEX_HOME=" + f.codexHome, nil
 		case slices.Contains(args, sessionReadyPromptEnvKey):
 			return sessionReadyPromptEnvKey + "=" + codexPromptPrefix, nil
 		}
@@ -292,7 +341,7 @@ func runCodexTurnNudge(t *testing.T, session string, setup func(*codexTurnPane))
 	synctest.Test(t, func(t *testing.T) {
 		pane = newCodexTurnPane(t, session)
 		setup(pane)
-		tm := &Tmux{cfg: DefaultConfig(), exec: pane}
+		tm := &Tmux{cfg: DefaultConfig(), exec: pane, codexRolloutHeld: pane.heldRollout}
 		err = tm.NudgeSession(session, message)
 		// Let the turn the submit started play out on the bubble's clock (no
 		// wall time passes), then cancel what is left of it.
@@ -336,7 +385,9 @@ func TestCodexSubmitLeavesTheTurnItStartedRunning(t *testing.T) {
 // TestCodexSubmitAbortedBeforeItWasRecordedIsNotDelivered: when the turn the
 // submit started ends before Codex records the message (here an abort GC did
 // not cause), the message never landed. A drained composer is not proof of
-// delivery then, and the submit must not report success.
+// delivery then, and the submit must not report success. The session has no
+// CODEX_HOME (Codex's default ~/.codex, as in a stock deployment): its rollout
+// is found as the file its own Codex holds open.
 func TestCodexSubmitAbortedBeforeItWasRecordedIsNotDelivered(t *testing.T) {
 	pane, err := runCodexTurnNudge(t, "codex-submit-lost", func(p *codexTurnPane) {
 		p.busyHiddenFor = time.Hour
@@ -355,6 +406,109 @@ func TestCodexSubmitAbortedBeforeItWasRecordedIsNotDelivered(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession = %v, want it to wrap ErrNudgeSubmitUnconfirmed so retrying callers retry it", err)
+	}
+}
+
+// TestCodexSubmitVerdictReadsTheSessionsOwnRollout: Codex sessions commonly
+// share one home (~/.codex) and one working directory, so the newest rollout
+// there, or one matched by its recorded cwd, can be another session's. The
+// verdict reads only the rollout this session's Codex holds open: another
+// session's newer abort does not lose this submit, and another session
+// recording the same text does not deliver it.
+func TestCodexSubmitVerdictReadsTheSessionsOwnRollout(t *testing.T) {
+	envContext := map[string]any{"type": "response_item", "payload": map[string]any{
+		"type": "message", "role": "user",
+		"content": []map[string]any{{"type": "input_text", "text": "<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"}},
+	}}
+	taskStarted := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_started", "turn_id": "turn-other"}}
+	otherAborted := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "turn_aborted", "reason": "interrupted"}}
+	otherRecorded := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "user_message", "message": codexTurnMarker}}
+
+	t.Run("another session's newer abort does not lose a recorded submit", func(t *testing.T) {
+		pane, err := runCodexTurnNudge(t, "codex-verdict-own-landed", func(p *codexTurnPane) {
+			p.busyHiddenFor = time.Hour
+			p.otherSessionWrites(200*time.Millisecond, envContext, taskStarted, otherAborted)
+		})
+		if recorded, _, _ := pane.snapshot(); !slices.Equal(recorded, []string{codexTurnMarker}) {
+			t.Fatalf("Codex recorded %q, want the message once", recorded)
+		}
+		if err != nil {
+			t.Fatalf("NudgeSession = %v, want nil: this session's rollout recorded the message", err)
+		}
+	})
+
+	t.Run("another session recording the same text does not deliver a lost submit", func(t *testing.T) {
+		pane, err := runCodexTurnNudge(t, "codex-verdict-own-lost", func(p *codexTurnPane) {
+			p.busyHiddenFor = time.Hour
+			p.recordAfter = 3 * time.Second
+			p.selfAbortAfter = time.Second
+			p.otherSessionWrites(1500*time.Millisecond, envContext, taskStarted, otherRecorded)
+		})
+		if recorded, _, _ := pane.snapshot(); len(recorded) != 0 {
+			t.Fatalf("Codex recorded %q, want nothing (the fixture aborts first)", recorded)
+		}
+		if !errors.Is(err, ErrNudgeSubmitLost) {
+			t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitLost: this session's rollout records the abort", err)
+		}
+	})
+}
+
+// TestCodexSubmitVerdictWithoutItsOwnRolloutStandsUnobserved: when no single
+// rollout can be tied to the session's Codex (none held open, two held in its
+// process tree, or open files that cannot be read), the verdict does not
+// guess from other rollouts: the drained composer stands as delivery that was
+// not observed, as it did before the rollout was read.
+func TestCodexSubmitVerdictWithoutItsOwnRolloutStandsUnobserved(t *testing.T) {
+	pane, err := runCodexTurnNudge(t, "codex-verdict-unattributed", func(p *codexTurnPane) {
+		p.busyHiddenFor = time.Hour
+		p.recordAfter = 3 * time.Second
+		p.selfAbortAfter = time.Second
+		p.held = func(int) string { return "" }
+	})
+	if recorded, _, _ := pane.snapshot(); len(recorded) != 0 {
+		t.Fatalf("Codex recorded %q, want nothing (the fixture aborts first)", recorded)
+	}
+	if !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) || errors.Is(err, ErrNudgeSubmitLost) {
+		t.Fatalf("NudgeSession = %v, want ErrNudgeDeliveredUnobserved and not ErrNudgeSubmitLost", err)
+	}
+}
+
+// selectHeldCodexRollout names a session's rollout by the process tree under
+// its pane: the one rollout held open there, whichever process holds it.
+func TestSelectHeldCodexRollout(t *testing.T) {
+	const (
+		own   = "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T08-42-16-01a13eb9-f318-7c32-87de-d469fe118a8b.jsonl"
+		other = "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T08-42-17-01a13eba-0000-7000-8000-000000000002.jsonl"
+	)
+	// 4242 is the pane's shell, 4300 the codex launcher, 4301 the codex
+	// binary; 5000 is another session's codex.
+	records := []proctable.ProcessRecord{
+		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 5000, PPID: 1},
+	}
+	for _, tt := range []struct {
+		name  string
+		files map[int][]string
+		err   map[int]bool
+		want  string
+	}{
+		{"held by a descendant", map[int][]string{4242: {"/dev/pts/3"}, 4301: {"/home/user/city", own}, 5000: {other}}, nil, own},
+		{"the same rollout held twice", map[int][]string{4300: {own}, 4301: {own, own}}, nil, own},
+		{"none held yet", map[int][]string{4301: {"/home/user/city"}, 5000: {other}}, nil, ""},
+		{"two rollouts in the tree", map[int][]string{4300: {other}, 4301: {own}}, nil, ""},
+		{"a descendant whose files cannot be read", map[int][]string{4301: {own}}, map[int]bool{4300: true}, ""},
+		{"a rollout-named file outside sessions", map[int][]string{4301: {"/tmp/rollout-x.jsonl"}}, nil, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			openFiles := func(pid int) ([]string, error) {
+				if tt.err[pid] {
+					return nil, errors.New("permission denied")
+				}
+				return tt.files[pid], nil
+			}
+			if got := selectHeldCodexRollout(records, 4242, openFiles); got != tt.want {
+				t.Fatalf("selectHeldCodexRollout = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -506,7 +660,7 @@ func TestCodexStartupNudgeHoldsItsSubmitWhileATurnRuns(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pane := newCodexTurnPane(t, session)
 		pane.startEarlierTurn(time.Hour)
-		tm := &Tmux{cfg: DefaultConfig(), exec: pane}
+		tm := &Tmux{cfg: DefaultConfig(), exec: pane, codexRolloutHeld: pane.heldRollout}
 
 		err := tm.nudgeStartupSession(session, codexTurnMarker)
 		pane.stop()
