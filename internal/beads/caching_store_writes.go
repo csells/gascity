@@ -782,10 +782,32 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 		tx.backing = backingTx
 		return fn(tx)
 	}); err != nil {
+		// A backing without atomic rollback may have committed some or all of
+		// the Tx's writes before failing, and an ErrWriteUnconfirmed answer
+		// committed at least one. Fence the touched rows so the next read
+		// asks the backing rather than serving the pre-Tx row: a caller
+		// re-reading to learn the outcome must see what landed.
+		if !StoreSupportsAtomicTx(c.backing) || errors.Is(err, ErrWriteUnconfirmed) {
+			c.fenceTxTouchedBeads(tx.ids)
+		}
 		return err
 	}
 	c.refreshTxTouchedBeads(tx.ids, tx.closed, startSeq)
 	return nil
+}
+
+// fenceTxTouchedBeads marks the rows a failed Tx touched dirty, as a failed
+// SetMetadataBatch does, until an ordinary read installs backing truth.
+func (c *CachingStore) fenceTxTouchedBeads(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for _, id := range ids {
+		c.noteMutationLocked(id)
+		c.markDirtyLocked(id)
+	}
+	c.mu.Unlock()
 }
 
 // AtomicTx reports whether Tx is atomic, which for the caching store is exactly
