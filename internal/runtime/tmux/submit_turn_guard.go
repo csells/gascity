@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -123,25 +127,32 @@ const codexSubmitRecordWait = 10 * time.Second
 const codexSubmitRecordTailBytes = 512 * 1024
 
 // unobservedSubmitVerdict judges a submit whose turn was never seen busy but
-// whose composer drained. For a Codex session whose rollout it can read, the
-// rollout decides, within codexSubmitRecordWait: the message recorded as a
-// user turn is a delivery (nil); the turn aborted before the message was
-// recorded is a loss (ErrNudgeSubmitLost). Without that record, or without a
-// verdict in time, the drained composer stands as delivery that was not
-// observed (ErrNudgeSubmitDeliveredUnobserved).
+// whose composer drained. For a Codex session whose own rollout it can name
+// (see codexRolloutOf), that rollout decides, within codexSubmitRecordWait:
+// the message recorded as a user turn is a delivery (nil); the turn aborted
+// before the message was recorded is a loss (ErrNudgeSubmitLost). Without
+// that rollout, or without a verdict in time, the drained composer stands as
+// delivery that was not observed (ErrNudgeSubmitDeliveredUnobserved).
 func (t *Tmux) unobservedSubmitVerdict(session string, typedAt time.Time, message string) error {
 	unobserved := fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
-	codexHome := t.codexHomeOf(session)
-	if codexHome == "" {
+	if sessionlog.ProviderFamily(t.providerEnv(session)) != "codex" {
 		return unobserved
 	}
 	deadline := time.Now().Add(codexSubmitRecordWait)
+	rollout := ""
 	for {
-		switch codexSubmitRecordIn(codexHome, typedAt, message) {
-		case codexSubmitLanded:
-			return nil
-		case codexSubmitLost:
-			return fmt.Errorf("%w: session %q: Codex's rollout records the turn aborted and never the message", ErrNudgeSubmitLost, session)
+		// Codex creates its rollout lazily, on the first turn it records, so
+		// a fresh session's file can appear only after the submit.
+		if rollout == "" {
+			rollout = t.codexRolloutOf(session)
+		}
+		if rollout != "" {
+			switch codexSubmitRecordIn(rollout, typedAt, message) {
+			case codexSubmitLanded:
+				return nil
+			case codexSubmitLost:
+				return fmt.Errorf("%w: session %q: Codex's rollout records the turn aborted and never the message", ErrNudgeSubmitLost, session)
+			}
 		}
 		if !time.Now().Before(deadline) {
 			return unobserved
@@ -150,17 +161,84 @@ func (t *Tmux) unobservedSubmitVerdict(session string, typedAt time.Time, messag
 	}
 }
 
-// codexHomeOf returns the CODEX_HOME of a Codex session, or "" for a session
-// of another family or one that does not say.
-func (t *Tmux) codexHomeOf(session string) string {
-	if sessionlog.ProviderFamily(t.providerEnv(session)) != "codex" {
-		return ""
-	}
-	home, err := t.GetEnvironment(session, "CODEX_HOME")
+// codexRolloutOf returns the rollout the session's own Codex process holds
+// open, or "" when that cannot be told. The process is the identity: Codex
+// sessions commonly share a home (no CODEX_HOME, so ~/.codex) and a working
+// directory, so the newest rollout under the home, or one matched by its
+// recorded cwd, can be another session's.
+func (t *Tmux) codexRolloutOf(session string) string {
+	out, err := t.GetPanePID(session)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(home)
+	pid, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || pid <= 1 {
+		return ""
+	}
+	held := t.codexRolloutHeld
+	if held == nil {
+		held = heldCodexRollout
+	}
+	return held(pid)
+}
+
+// heldCodexRollout returns the one Codex rollout held open by the process
+// tree rooted at panePID, read from the live process table.
+func heldCodexRollout(panePID int) string {
+	records, err := proctable.SnapshotProcesses()
+	if err != nil {
+		return ""
+	}
+	return selectHeldCodexRollout(records, panePID, proctable.OpenFiles)
+}
+
+// selectHeldCodexRollout returns the one Codex rollout that root or any of
+// its descendants in records holds open, per openFiles. Two different
+// rollouts held in the tree, or a process whose open files cannot be read,
+// return "": a guess could judge this submit by another conversation's
+// record.
+func selectHeldCodexRollout(records []proctable.ProcessRecord, root int, openFiles func(int) ([]string, error)) string {
+	children := make(map[int][]int, len(records))
+	for _, r := range records {
+		if r.PID != root {
+			children[r.PPID] = append(children[r.PPID], r.PID)
+		}
+	}
+	held := ""
+	seen := map[int]bool{root: true}
+	queue := []int{root}
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		files, err := openFiles(pid)
+		if err != nil {
+			return ""
+		}
+		for _, file := range files {
+			if !isCodexRolloutPath(file) || file == held {
+				continue
+			}
+			if held != "" {
+				return ""
+			}
+			held = file
+		}
+		for _, child := range children[pid] {
+			if !seen[child] {
+				seen[child] = true
+				queue = append(queue, child)
+			}
+		}
+	}
+	return held
+}
+
+// isCodexRolloutPath reports whether path names a Codex rollout,
+// <home>/sessions/YYYY/MM/DD/rollout-<stamp>-<id>.jsonl.
+func isCodexRolloutPath(path string) bool {
+	name := filepath.Base(path)
+	return strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, ".jsonl") &&
+		strings.Contains(filepath.ToSlash(path), "/sessions/")
 }
 
 // codexSubmitRecord is what Codex's rollout says about a submitted message.
@@ -187,11 +265,11 @@ func (r codexSubmitRecord) String() string {
 	}
 }
 
-// codexSubmitRecordIn reads the newest rollout under codexHome for the
-// message submitted at since.
-func codexSubmitRecordIn(codexHome string, since time.Time, message string) codexSubmitRecord {
-	path, modTime, err := latestCodexTranscriptPath(codexHome)
-	if err != nil || modTime.Before(since.Truncate(time.Second)) {
+// codexSubmitRecordIn reads the rollout at path for the message submitted at
+// since.
+func codexSubmitRecordIn(path string, since time.Time, message string) codexSubmitRecord {
+	info, err := os.Stat(path)
+	if err != nil || info.ModTime().Before(since.Truncate(time.Second)) {
 		return codexSubmitUnknown
 	}
 	tail, err := readFileTail(path, codexSubmitRecordTailBytes)

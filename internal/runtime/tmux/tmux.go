@@ -468,6 +468,11 @@ type Tmux struct {
 	// turn's background terminals (stopCodexBackgroundTerminals). Nil selects
 	// sleepWithContext; tests inject one so the pauses take no wall time.
 	codexStopSleep func(context.Context, time.Duration) error
+
+	// codexRolloutHeld returns the one Codex rollout the process tree rooted
+	// at a pane's PID holds open, or "" (see heldCodexRollout). Nil selects
+	// heldCodexRollout; tests inject one so no live process table is read.
+	codexRolloutHeld func(panePID int) string
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
