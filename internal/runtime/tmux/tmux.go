@@ -276,6 +276,13 @@ var (
 	// days of production logs). It wraps runtime.ErrNudgeDeliveredUnobserved
 	// so callers that only know the runtime contract treat it as delivered.
 	ErrNudgeSubmitDeliveredUnobserved = fmt.Errorf("%w: submit Enter delivered and composer drained but busy state was never observed", runtime.ErrNudgeDeliveredUnobserved)
+	// ErrNudgeSubmitLost indicates the provider's own record proves the
+	// message did not land: the turn the submit started ended (Codex's
+	// rollout records turn_aborted) before the provider recorded the message
+	// as a user turn. A drained composer is then no proof of delivery. It
+	// wraps ErrNudgeSubmitUnconfirmed, so callers that retry an unconfirmed
+	// submit retry this one too, and none reports it delivered.
+	ErrNudgeSubmitLost = fmt.Errorf("%w: the provider ended the turn before it recorded the message", ErrNudgeSubmitUnconfirmed)
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -2778,46 +2785,75 @@ const (
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
 func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
+	confirmed, sawIdle, _, err := submitAndConfirm(sendSubmit, wake, busy, nil, sleep)
+	return confirmed, sawIdle, err
+}
+
+// submitAndConfirm is submitEnterAndConfirm for a submit sequence of either
+// kind, also reporting how many submits it sent. mayResend is nil for a
+// sequence that cannot interrupt a turn (plain Enter). For one that can
+// (Codex's Escape-led submit, see submitSequenceInterrupts) it is set, and the
+// loop then sends only into a pane it has evidence is waiting for the submit:
+//
+//   - the first submit is held while the baseline reading is busy (a turn
+//     running since before the call), and is sent at a later round once the
+//     pane reads idle and mayResend agrees;
+//   - every later submit needs mayResend to report, from a look taken right
+//     before the send, that the message still sits unsubmitted in an idle
+//     composer. A drained composer means the earlier submit was taken: its
+//     turn may be running without a visible busy row yet (a UserPromptSubmit
+//     hook, a contended host), and an Escape sent into it aborts the turn
+//     before the provider records the message (healthy-direct, 2026-10-15). A
+//     look that fails is not evidence, so it sends nothing either.
+func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
 	// Baseline reading before the first send: an idle baseline lets send 0's
 	// own polls confirm, while a busy or failed one leaves the pane needing
 	// an idle reading first.
 	watch := busyTransition{busy: busy}
-	watch.observe()
+	baselineBusy, _ := watch.observe()
 
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
-		resend := true
-		if send > 0 {
+		var resend bool
+		if send == 0 {
+			// An interrupting submit is never sent into a running turn.
+			resend = mayResend == nil || !baselineBusy
+		} else {
 			isBusy, confirmed := watch.observe()
 			if confirmed {
-				return true, true, nil
+				return true, true, sent, nil
 			}
 			// Busy without an idle reading yet: the turn running since before
 			// this call has not finished. Never submit into it; keep watching.
 			resend = !isBusy
 			sleep(submitReEnterBackoff)
+			if resend && mayResend != nil {
+				waiting, lookErr := mayResend()
+				resend = lookErr == nil && waiting
+			}
 		}
 		if resend {
 			if err := sendSubmit(); err != nil {
 				if isLookRefusal(err) {
 					// Never re-send into a permission prompt, or into a pane a
 					// look could not read.
-					return false, watch.seenIdle, err
+					return false, watch.seenIdle, sent, err
 				}
 				lastErr = err
 				continue
 			}
+			sent++
 			lastErr = nil // a later send succeeded; don't surface an earlier transient failure
 			wake()
 		}
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
 			if _, confirmed := watch.observe(); confirmed {
-				return true, true, nil
+				return true, true, sent, nil
 			}
 			sleep(submitConfirmPollInterval)
 		}
 	}
-	return false, watch.seenIdle, lastErr
+	return false, watch.seenIdle, sent, lastErr
 }
 
 // busyTransition tracks the idle->busy transition that confirms a submit. A
@@ -3157,6 +3193,7 @@ func (t *Tmux) nudgeSessionCtx(ctx context.Context, session, message string) err
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		t.pendingPromptRecheck(session),
+		true,
 	)
 }
 
@@ -3189,6 +3226,7 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		nil,
+		false,
 	)
 }
 
@@ -3248,6 +3286,15 @@ func (g *nudgePromptGuard) refused(err error) error {
 // noPendingPrompt, when set, is checked under the nudge lock before the first
 // key, immediately before the paste, and immediately before every submit key;
 // its error aborts the nudge with no further keys sent.
+//
+// guardTurn makes a nudge whose submit keys would interrupt a running turn
+// (Codex's Escape-led submit, see submitSequenceInterrupts) wait for the
+// agent's composer to be idle before it types anything, and defer with an
+// error wrapping runtime.ErrSessionBusy, nothing typed, when a turn is still
+// running at the end of that wait (see awaitIdleComposerBeforeTyping). The
+// startup nudge does not take that wait (the start's own readiness wait
+// precedes it); like every nudge, it still never sends an interrupting
+// submit into a turn its confirm loop sees running (see submitAndConfirm).
 func (t *Tmux) nudgeSession(
 	ctx context.Context,
 	session, message string,
@@ -3255,6 +3302,7 @@ func (t *Tmux) nudgeSession(
 	shouldSendEscape func(string) bool,
 	submitKeySequence func(string) []string,
 	noPendingPrompt func(target string) error,
+	guardTurn bool,
 ) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
@@ -3300,6 +3348,16 @@ func (t *Tmux) nudgeSession(
 	// render/input loop so the paste is actually consumed. The post-send wake
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session, target)
+
+	// The submit keys this nudge ends with. When they would interrupt a
+	// running turn, nothing is typed until the composer reads idle.
+	submitKeys := submitKeySequence(target)
+	interrupts := submitSequenceInterrupts(submitKeys)
+	if guardTurn && interrupts {
+		if err := t.awaitIdleComposerBeforeTyping(session, target, submitKeys); err != nil {
+			return err
+		}
+	}
 
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
@@ -3357,6 +3415,9 @@ func (t *Tmux) nudgeSession(
 	if err := prompt.check(); err != nil {
 		return err
 	}
+	// The provider's own record of this delivery is read from here on (see
+	// unobservedSubmitVerdict).
+	typedAt := time.Now()
 	if err := sendText(ctx, target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -3390,18 +3451,24 @@ func (t *Tmux) nudgeSession(
 	// with a known staged-draft marker get a slower, bounded recovery
 	// (recoverStagedDraft). Providers without a reliable indicator keep
 	// best-effort delivery.
-	submitKeys := submitKeySequence(target)
-	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
-	// Escape is only safe to repeat while the pane is still idle. If the first
-	// attempt actually submitted and the pane went busy, a re-sent Escape is an
-	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
-	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
-	// re-checks busy before every re-send, which is why the verified path is safe
-	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
-	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
-	// only for single-key (plain Enter) sequences, which is what every family
-	// without a table entry has. Adding a multi-key entry for a family that is
-	// not submit-verify eligible would need that gap closed first.
+	//
+	// RE-SEND HAZARD: a submit sequence that leads with Escape is safe to
+	// repeat only while the message still waits in an idle composer. If the
+	// first attempt submitted, a re-sent Escape is an INTERRUPT for the very
+	// TUIs that need the Escape (codex reads it as cancel), and it kills the
+	// turn it just started. The pane's busy row is not enough to tell: a
+	// Codex turn can run for seconds before it draws one (its
+	// UserPromptSubmit hook runs first, and a contended host draws late), and
+	// an Escape in that window aborts the turn before Codex records the
+	// message (healthy-direct, 2026-10-15: turn_aborted 1609 ms in, the
+	// marker never recorded, the submit reported delivered). So the verified
+	// path sends an interrupting sequence again only when a look right before
+	// the send shows the message still in an idle composer (mayResend below,
+	// see submitAndConfirm). The best-effort fallback below and NudgePane's
+	// retry loop do NOT look; they are safe only for single-key (plain Enter)
+	// sequences, which is what every family without a table entry has. Adding
+	// a multi-key entry for a family that is not submit-verify eligible would
+	// need that gap closed first.
 	//
 	// Every submit is preceded by a look for a permission prompt: Enter on
 	// one picks its highlighted option (see nudgePromptGuard.refused).
@@ -3410,13 +3477,26 @@ func (t *Tmux) nudgeSession(
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
-		confirmed, sawIdle, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		var mayResend func() (bool, error)
+		if interrupts {
+			mayResend = func() (bool, error) { return t.submitStillWaiting(target) }
+		}
+		confirmed, sawIdle, sent, err := submitAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, mayResend, time.Sleep)
 		if isLookRefusal(err) {
 			delivered = prompt.submitsSent > 0
 			return prompt.refused(err)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
+		}
+		if sent == 0 {
+			// Every round found a turn running (or no message waiting), so the
+			// interrupting submit was never sent: the message sits typed in
+			// the composer, undelivered, and the next delivery's clear
+			// replaces it. Busy, so a deferring caller queues it; unconfirmed,
+			// so a retrying caller (the startup ladder) re-runs the delivery.
+			return fmt.Errorf("%w: %w: session %q: a turn was running when the message was ready to submit, so its submit keys (%s) were held back; the message is typed but not submitted",
+				runtime.ErrSessionBusy, ErrNudgeSubmitUnconfirmed, session, strings.Join(submitKeys, " "))
 		}
 		delivered = true
 		if !confirmed {
@@ -3436,7 +3516,7 @@ func (t *Tmux) nudgeSession(
 					case stagedDraftSubmittedBusy:
 						return nil
 					case stagedDraftCleared:
-						return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+						return t.unobservedSubmitVerdict(session, typedAt, message)
 					}
 					// stagedDraftUnresolved falls through to the handling below.
 				}
@@ -3456,7 +3536,7 @@ func (t *Tmux) nudgeSession(
 			// only the busy-state OBSERVATION missed it — so that case must be
 			// reported as proven delivery, not requeued as a failure.
 			if lines, capErr := t.captureInputLines(target); capErr == nil && paneShowsDrainedComposer(lines) {
-				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+				return t.unobservedSubmitVerdict(session, typedAt, message)
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
