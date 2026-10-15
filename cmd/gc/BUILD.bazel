@@ -1277,6 +1277,7 @@ go_test(
         "cmd_wait_partial_test.go",
         "cmd_wait_test.go",
         "cmd_worktree_test.go",
+        "codex_default_model_test.go",
         "codex_hooks_dual_write_test.go",
         "command_context_test.go",
         "completion_command_test.go",
