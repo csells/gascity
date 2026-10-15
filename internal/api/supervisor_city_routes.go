@@ -417,7 +417,11 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionRespond)
 	cityPost(sm, "/session/{id}/suspend", (*Server).humaHandleSessionSuspend, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
-	cityPost(sm, "/session/{id}/close", (*Server).humaHandleSessionClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/close", (*Server).humaHandleSessionClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Ends the session permanently: stops its runtime and closes its session bead. "+
+			"Closing a session that is already closed answers 200, so a retry is safe; address it by session ID, because a closed session no longer resolves by its alias or name. "+
+			"A close the store committed but could not read back in time is settled by re-reading the session: when it reads closed the answer is 200, not an error. "+
+			"When it does not, the answer is 503 with detail prefix write_unconfirmed: the close may still land, so re-read the session or retry the close."))
 	cityPost(sm, "/session/{id}/wake", (*Server).humaHandleSessionWake, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. "+
 			"409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. "+

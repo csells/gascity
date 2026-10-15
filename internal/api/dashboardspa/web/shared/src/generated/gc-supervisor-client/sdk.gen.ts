@@ -1025,6 +1025,8 @@ export const getV0CityByCityNameSessionByIdAgentsByAgentId = <ThrowOnError exten
 
 /**
  * Post v0 city by city name session by ID close
+ *
+ * Ends the session permanently: stops its runtime and closes its session bead. Closing a session that is already closed answers 200, so a retry is safe; address it by session ID, because a closed session no longer resolves by its alias or name. A close the store committed but could not read back in time is settled by re-reading the session: when it reads closed the answer is 200, not an error. When it does not, the answer is 503 with detail prefix write_unconfirmed: the close may still land, so re-read the session or retry the close.
  */
 export const postV0CityByCityNameSessionByIdClose = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdCloseData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdCloseResponses, PostV0CityByCityNameSessionByIdCloseErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/close', ...options });
 
