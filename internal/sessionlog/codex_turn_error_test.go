@@ -1,6 +1,7 @@
 package sessionlog
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -127,4 +128,81 @@ func mustParseCodexTestTime(t *testing.T, value string) time.Time {
 		t.Fatalf("parse %q: %v", value, err)
 	}
 	return ts
+}
+
+// testdata/codex/task_complete_api_error_0.162.1.jsonl ends with the
+// task_complete line codex-cli 0.162.1 wrote, verbatim, when a ChatGPT-account
+// login was launched with a model its plan does not serve (the lines before it
+// are a minimal synthesized turn). Its error.message is itself the provider's
+// JSON API error and codex_error_info is the catch-all "other".
+func TestReadCodexFileCodex0162TaskCompleteAPIError(t *testing.T) {
+	sess, err := ReadCodexFile(filepath.Join("testdata", "codex", "task_complete_api_error_0.162.1.jsonl"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sess.Messages); got != 2 {
+		t.Fatalf("Messages = %d, want the prompt and the turn error: %+v", got, sess.Messages)
+	}
+	msg := sess.Messages[1]
+	want := SystemEvent{
+		Kind:     "error",
+		Category: "provider_error",
+		Code:     "http_400:invalid_request_error",
+		Message:  "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+	}
+	if msg.Type != "system" || msg.SystemEvent == nil || *msg.SystemEvent != want {
+		t.Fatalf("turn error entry = %+v (SystemEvent %+v), want %+v", msg, msg.SystemEvent, want)
+	}
+	if text := msg.ContentBlocks()[0].Text; text != want.Message {
+		t.Fatalf("text = %q, want the provider's inner message", text)
+	}
+}
+
+// A provider error message that is a JSON API error is presented by its inner
+// message, with the HTTP status and error type in the code when Codex's own
+// classification is the catch-all. Anything else is shown as written.
+func TestCodexSystemEventUnwrapsJSONAPIErrorMessage(t *testing.T) {
+	apiErr := `{"type":"error","status":429,"error":{"type":"rate_limit_error","message":"Slow down."}}`
+	for _, tc := range []struct {
+		name string
+		em   codexEventMsg
+		want SystemEvent
+	}{
+		{
+			name: "catch-all info takes status and type",
+			em:   codexEventMsg{Type: "error", Message: apiErr, CodexErrorInfo: []byte(`"other"`)},
+			want: SystemEvent{Kind: "error", Category: "provider_error", Code: "http_429:rate_limit_error", Message: "Slow down."},
+		},
+		{
+			name: "no info takes status and type",
+			em:   codexEventMsg{Type: "error", Message: apiErr},
+			want: SystemEvent{Kind: "error", Category: "provider_error", Code: "http_429:rate_limit_error", Message: "Slow down."},
+		},
+		{
+			name: "specific info is kept",
+			em:   codexEventMsg{Type: "error", Message: apiErr, CodexErrorInfo: []byte(`"usage_limit_exceeded"`)},
+			want: SystemEvent{Kind: "error", Category: "usage_limit", Code: "usage_limit_exceeded", Message: "Slow down."},
+		},
+		{
+			name: "type without status",
+			em:   codexEventMsg{Type: "error", Message: `{"error":{"type":"invalid_request_error","message":"Bad."}}`},
+			want: SystemEvent{Kind: "error", Category: "provider_error", Code: "invalid_request_error", Message: "Bad."},
+		},
+		{
+			name: "plain text stays raw",
+			em:   codexEventMsg{Type: "error", Message: "unexpected status 400", CodexErrorInfo: []byte(`"other"`)},
+			want: SystemEvent{Kind: "error", Category: "provider_error", Code: "other", Message: "unexpected status 400"},
+		},
+		{
+			name: "JSON without an inner message stays raw",
+			em:   codexEventMsg{Type: "error", Message: `{"type":"error","status":500}`},
+			want: SystemEvent{Kind: "error", Category: "provider_error", Message: `{"type":"error","status":500}`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexSystemEvent(tc.em); *got != tc.want {
+				t.Fatalf("codexSystemEvent = %+v, want %+v", *got, tc.want)
+			}
+		})
+	}
 }

@@ -123,3 +123,54 @@ func TestHandleSessionStreamSurfacesCodexTurnError(t *testing.T) {
 		t.Fatalf("session stream leaked provider-native Codex fields: %s", body)
 	}
 }
+
+// codex0162TaskCompleteAPIErrorLine is the task_complete line codex-cli 0.162.1
+// wrote, verbatim, when the provider rejected the model (see
+// internal/sessionlog/testdata/codex/task_complete_api_error_0.162.1.jsonl).
+// Its error.message is itself a JSON API error.
+const codex0162TaskCompleteAPIErrorLine = `{"timestamp":"2026-10-14T22:35:00.564Z","type":"event_msg","payload":{"type":"task_complete","root_turn_id":"01a13c8d-84c2-73f1-af00-f385a6bad53e","turn_id":"01a13c8d-84c2-73f1-af00-f385a6bad53e","last_agent_message":null,"error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.\"}}","codex_error_info":"other"},"started_at":1792017270,"completed_at":1792017300,"duration_ms":30547}}`
+
+func TestHandleSessionTranscriptSurfacesCodex0162TaskCompleteAPIError(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeStructuredCodexFixture(t, searchBase, info.WorkDir, "2026-10-14T22-34-30", info.SessionKey, []string{
+		`{"timestamp":"2026-10-14T22:34:30.017Z","type":"event_msg","payload":{"type":"task_started","root_turn_id":"01a13c8d-84c2-73f1-af00-f385a6bad53e","turn_id":"01a13c8d-84c2-73f1-af00-f385a6bad53e","started_at":1792017270}}`,
+		`{"timestamp":"2026-10-14T22:34:30.030Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"startup prompt"}]}}`,
+		codex0162TaskCompleteAPIErrorLine,
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	body := w.Body.Bytes()
+	var resp sessionTranscriptGetResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	msgs := structuredTranscriptMessages(resp)
+	if len(msgs) != 2 {
+		t.Fatalf("StructuredMessages = %+v, want the prompt and the turn error", msgs)
+	}
+	want := SessionStructuredSystemEvent{Kind: "error", Category: "provider_error", Code: "http_400:invalid_request_error", Message: codexTurnErrorMessage}
+	last := msgs[1]
+	if last.Role != "system" || last.SystemEvent == nil || *last.SystemEvent != want {
+		t.Fatalf("last message = %+v (system_event %+v), want system error %+v", last, last.SystemEvent, want)
+	}
+	if len(last.Blocks) != 1 || last.Blocks[0].Text != codexTurnErrorMessage {
+		t.Fatalf("blocks = %+v, want the provider's inner message", last.Blocks)
+	}
+	assertNoStructuredWireLeak(t, body)
+}

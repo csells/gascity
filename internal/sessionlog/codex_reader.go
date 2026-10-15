@@ -1545,6 +1545,12 @@ func codexSystemEvent(em codexEventMsg) *SystemEvent {
 			message = "Turn aborted"
 		}
 	default:
+		if apiMessage, apiCode, ok := codexAPIErrorMessage(message); ok {
+			message = apiMessage
+			if code == "" || code == "other" {
+				code = apiCode
+			}
+		}
 		category = codexErrorCategory(code)
 		if message == "" {
 			message = "Provider reported an error"
@@ -1556,6 +1562,43 @@ func codexSystemEvent(em codexEventMsg) *SystemEvent {
 		Code:     code,
 		Message:  message,
 	}
+}
+
+// codexAPIErrorMessage unwraps a provider error message that Codex recorded
+// as the model API's JSON error body, e.g. (codex-cli 0.162.1)
+//
+//	{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"..."}}
+//
+// It returns the inner message and a code naming the HTTP status and error
+// type ("http_400:invalid_request_error"; either part alone when only one is
+// present). ok is false for anything without an inner message, which the
+// caller then shows as written.
+func codexAPIErrorMessage(message string) (inner, code string, ok bool) {
+	if !strings.HasPrefix(message, "{") {
+		return "", "", false
+	}
+	var body struct {
+		Status int `json:"status"`
+		Error  struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(message), &body) != nil {
+		return "", "", false
+	}
+	inner = strings.TrimSpace(body.Error.Message)
+	if inner == "" {
+		return "", "", false
+	}
+	var parts []string
+	if body.Status > 0 {
+		parts = append(parts, "http_"+strconv.Itoa(body.Status))
+	}
+	if errType := strings.TrimSpace(body.Error.Type); errType != "" {
+		parts = append(parts, errType)
+	}
+	return inner, strings.Join(parts, ":"), true
 }
 
 // codexErrorInfoCode names a codex_error_info value. Codex serializes it as a
