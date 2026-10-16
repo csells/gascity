@@ -709,9 +709,9 @@ func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, si
 	return p.tm.WaitForInterruptBoundary(ctx, name, since, timeout)
 }
 
-// StopBackgroundWork closes the background terminals a stopped Codex turn
-// left running. It implements [runtime.BackgroundWorkStopper]; see
-// [Tmux.StopBackgroundWork].
+// StopBackgroundWork closes the background terminals or shells a stopped
+// Codex or Claude turn left running. It implements
+// [runtime.BackgroundWorkStopper]; see [Tmux.StopBackgroundWork].
 func (p *Provider) StopBackgroundWork(ctx context.Context, name string) error {
 	return p.tm.StopBackgroundWork(ctx, name)
 }

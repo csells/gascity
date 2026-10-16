@@ -1655,10 +1655,11 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // Claude Code puts a prompt interrupted before its first response chunk back
 // into its input box, so for Claude StopTurn also clears the input box when
 // the runtime can do a verified clear (see clearRestoredInputLocked). Codex
-// keeps running an interrupted turn's commands in background terminals, so
-// for Codex StopTurn also has the runtime close them once the interrupt
-// boundary is reached (see stopBackgroundWorkLocked). That closes ALL of the
-// session's background terminals, including ones earlier turns started: a
+// keeps running an interrupted turn's commands in background terminals, and
+// Claude a command the model ran in the background, so for both StopTurn also
+// has the runtime stop them once the interrupt boundary is reached and any
+// restored prompt is cleared (see stopBackgroundWorkLocked). That stops ALL
+// of the session's background work, including what earlier turns started: a
 // stop stops the session's work. An interrupt_now submit does not do this.
 // A runtime that interrupts turns by protocol (runtime.TurnInterruptProtocol)
 // gets its Interrupt for every provider and no keys. A runtime that can
@@ -1698,9 +1699,6 @@ func (m *Manager) stopTurn(ctx context.Context, id string) error {
 		if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
-		if stopsBackgroundWork(b) {
-			m.stopBackgroundWorkLocked(context.Background(), sessName)
-		}
 		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
@@ -1708,6 +1706,11 @@ func (m *Manager) stopTurn(ctx context.Context, id string) error {
 			if _, err := m.clearRestoredInputLocked(ctx, sessName); err != nil {
 				log.Printf("session: stopped the turn of %q but %v", sessName, err)
 			}
+		}
+		// After the restored prompt is cleared: Claude's background shells
+		// are stopped from an empty input box.
+		if stopsBackgroundWork(b) {
+			m.stopBackgroundWorkLocked(context.Background(), sessName)
 		}
 		return nil
 	})

@@ -242,7 +242,7 @@ func (f *fakeCodexPane) pausedAfter(marker string) time.Duration {
 func newCodexStopTmux(pane *fakeCodexPane) *Tmux {
 	tm := NewTmux()
 	tm.exec = pane
-	tm.codexStopSleep = pane.sleep
+	tm.backgroundStopSleep = pane.sleep
 	tm.codexRolloutHeld = pane.heldRollout
 	return tm
 }
@@ -401,19 +401,20 @@ func TestCodexPaneReportsBackgroundTerminals(t *testing.T) {
 	}
 }
 
-// TestNonCodexStopBackgroundWorkIsUnsupported: a Claude session has no
-// background work for the runtime to stop; no keys reach its pane.
-func TestNonCodexStopBackgroundWorkIsUnsupported(t *testing.T) {
+// TestOtherProvidersStopBackgroundWorkIsUnsupported: a session that runs
+// neither Codex nor Claude has no background work for the runtime to stop; no
+// keys reach its pane.
+func TestOtherProvidersStopBackgroundWorkIsUnsupported(t *testing.T) {
 	pane := newFakeCodexPane(t)
-	pane.provider = "claude"
+	pane.provider = "gemini"
 	tm := newCodexStopTmux(pane)
 
 	err := tm.StopBackgroundWork(context.Background(), "codex-bg-stop-f")
 	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("StopBackgroundWork(claude) = %v, want ErrInteractionUnsupported", err)
+		t.Fatalf("StopBackgroundWork(gemini) = %v, want ErrInteractionUnsupported", err)
 	}
 	if got := pane.typedOrPressed(); len(got) != 0 {
-		t.Fatalf("keys reaching a Claude pane = %q, want none", got)
+		t.Fatalf("keys reaching a Gemini pane = %q, want none", got)
 	}
 }
 

@@ -92,13 +92,14 @@ func checkInterruptNow(t *testing.T, fam turnInterruptFamily, mgr *Manager, sp *
 // runtime runs is the fresh read's. pi's restart reads the runtime fresh
 // once more under its lease before it mints (I-MINT): a start never mints
 // over a live runtime.)
-// A Codex stop also ends with StopBackgroundWork, which runtime.Fake
-// implements: the runtime closes the background terminals the interrupted
-// turn left running.
+// A Codex or Claude stop also ends with StopBackgroundWork, which
+// runtime.Fake implements: the runtime closes the background terminals or
+// shells the interrupted turn left running, Claude's after its restored
+// input is cleared.
 func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle ClearInput",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle ClearInput StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle ClearInput IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"codex": {
@@ -242,12 +243,13 @@ func TestKeystrokeTurnInterruptBehindCompositesKeepsProviderSequences(t *testing
 // A runtime whose turns are protocol-driven drops keystrokes, so every family
 // must be interrupted through Interrupt and no keys may be sent: a dropped
 // Escape would leave the turn running while the caller is told it stopped.
-// A Codex stop still asks the runtime to stop the turn's background work; the
-// runtime decides how, and one that cannot reports ErrInteractionUnsupported.
+// A Codex or Claude stop still asks the runtime to stop the turn's background
+// work; the runtime decides how, and one that cannot reports
+// ErrInteractionUnsupported.
 func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"codex": {

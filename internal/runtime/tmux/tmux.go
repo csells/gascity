@@ -464,10 +464,11 @@ type Tmux struct {
 	// termination happens without signaling real processes.
 	certifiedPaneTerminator func(processKillPlan) error
 
-	// codexStopSleep pauses between the steps of closing an interrupted Codex
-	// turn's background terminals (stopCodexBackgroundTerminals). Nil selects
-	// sleepWithContext; tests inject one so the pauses take no wall time.
-	codexStopSleep func(context.Context, time.Duration) error
+	// backgroundStopSleep pauses between the steps of closing the background
+	// work an interrupted turn left running (stopCodexBackgroundTerminals,
+	// stopClaudeBackgroundShells). Nil selects sleepWithContext; tests inject
+	// one so the pauses take no wall time.
+	backgroundStopSleep func(context.Context, time.Duration) error
 
 	// codexRolloutHeld returns the one Codex rollout the process tree rooted
 	// at a pane's PID holds open, or "" (see heldCodexRollout). Nil selects
