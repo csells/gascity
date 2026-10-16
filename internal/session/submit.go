@@ -630,11 +630,17 @@ func requiresInterruptBoundaryWait(b beads.Bead) bool {
 // stopsBackgroundWork reports whether an explicit stop must also stop work
 // the provider keeps running after its turn is interrupted. Codex does: it
 // runs a turn's commands in background terminals that outlive the turn.
+// Claude does too: a command the model ran in the background outlives the
+// turn, and its completion notice starts another one.
 func stopsBackgroundWork(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	return providerKind(b) == "codex"
+	switch providerKind(b) {
+	case "codex", "claude":
+		return true
+	}
+	return false
 }
 
 // stopBackgroundWorkLocked has the runtime stop the work a stopped turn left

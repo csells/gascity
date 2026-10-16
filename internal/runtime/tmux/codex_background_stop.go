@@ -189,18 +189,22 @@ func closeCodexBackgroundTerminals(ops codexBackgroundStopOps) (codexBackgroundS
 	return codexBackgroundStillRunning, nil
 }
 
-// StopBackgroundWork closes the background terminals a stopped Codex turn
-// left running in session. It implements [runtime.BackgroundWorkStopper]:
-// session.Manager.StopTurn calls it once the interrupt boundary is reached,
-// and a replacement-message interrupt does not, so a new turn leaves an
-// earlier turn's dev server alone. Sessions that do not run Codex return
-// runtime.ErrInteractionUnsupported and get no keys.
+// StopBackgroundWork closes the background terminals a stopped Codex turn, or
+// the background shells a stopped Claude turn (see
+// claude_background_stop.go), left running in session. It implements
+// [runtime.BackgroundWorkStopper]: session.Manager.StopTurn calls it once the
+// interrupt boundary is reached, and a replacement-message interrupt does not,
+// so a new turn leaves an earlier turn's dev server alone. Sessions that run
+// neither return runtime.ErrInteractionUnsupported and get no keys.
 func (t *Tmux) StopBackgroundWork(ctx context.Context, session string) error {
-	provider := t.providerEnv(session)
-	if sessionlog.ProviderFamily(provider) != "codex" && !t.targetLooksLikeProvider(session, "codex") {
+	switch family := sessionlog.ProviderFamily(t.providerEnv(session)); {
+	case family == "codex" || (family != "claude" && t.targetLooksLikeProvider(session, "codex")):
+		return t.stopCodexBackgroundTerminals(ctx, session)
+	case family == "claude" || t.targetLooksLikeProvider(session, "claude"):
+		return t.stopClaudeBackgroundShells(ctx, session)
+	default:
 		return runtime.ErrInteractionUnsupported
 	}
-	return t.stopCodexBackgroundTerminals(ctx, session)
 }
 
 // stopCodexBackgroundTerminals closes the background terminals an interrupted
@@ -221,7 +225,7 @@ func (t *Tmux) stopCodexBackgroundTerminals(ctx context.Context, session string)
 		log.Printf("tmux: left any Codex background terminals of %q running after its interrupt: %v", session, err)
 		return nil
 	}
-	sleep := t.codexStopSleep
+	sleep := t.backgroundStopSleep
 	if sleep == nil {
 		sleep = sleepWithContext
 	}

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adapter.go",
         "agent_slice.go",
+        "claude_background_stop.go",
         "codex_background_stop.go",
         "composer_clear.go",
         "cutover.go",
@@ -65,6 +66,7 @@ go_test(
         "adapter_unit_test.go",
         "agent_slice_test.go",
         "attach_probe_test.go",
+        "claude_background_stop_test.go",
         "codex_background_stop_test.go",
         "codex_stop_turn_test.go",
         "codex_submit_test.go",

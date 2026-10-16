@@ -915,7 +915,9 @@ func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
 // Codex CLI runs a turn's commands in background terminals that outlive the
 // interrupted turn. tmux stops them with Codex's /stop, which closes ALL of
 // the session's background terminals, including ones earlier turns started:
-// stopping a session stops its work. StopBackgroundWork returns
+// stopping a session stops its work. Claude Code keeps a command the model
+// ran in the background running the same way; tmux stops ALL of its
+// background shells from Claude's background-task view. StopBackgroundWork returns
 // [ErrInteractionUnsupported] for sessions it has no such work to stop for.
 // Work it could not stop is logged rather than returned, because the turn is
 // already stopped; only the caller's context ending is an error.
