@@ -472,3 +472,25 @@ func TestCodexInterruptBoundaryWithoutItsOwnRolloutIsUnsupported(t *testing.T) {
 		t.Fatalf("WaitForInterruptBoundary = %v, want runtime.ErrInteractionUnsupported", err)
 	}
 }
+
+// codex-cli 0.162.1 records an interrupted turn as a <turn_aborted>
+// developer message and a turn_aborted event (rows from a live rollout,
+// 2026-10-16). Missing them, the interrupt_now boundary wait ran its full
+// timeout on every interrupt, and the submit then restarted Codex.
+func TestCodexTranscriptTailRecognizesCodex0162TurnAborted(t *testing.T) {
+	developer := `{"timestamp":"2026-10-16T02:43:26.418Z","ordinal":17,"type":"response_item","payload":{"type":"message","id":"msg_1","role":"developer","content":[{"type":"input_text","text":"<turn_aborted>\nThe previous turn was interrupted on purpose.\n</turn_aborted>"}]}}`
+	event := `{"timestamp":"2026-10-16T02:43:26.424Z","ordinal":18,"type":"event_msg","payload":{"type":"turn_aborted","root_turn_id":"t1","turn_id":"t1","reason":"interrupted"}}`
+	tokens := `{"timestamp":"2026-10-16T02:43:26.404Z","ordinal":16,"type":"event_msg","payload":{"type":"token_count"}}`
+	for name, tail := range map[string]string{
+		"developer message and event": tokens + "\n" + developer + "\n" + event,
+		"event alone":                 tokens + "\n" + event,
+		"developer message alone":     tokens + "\n" + developer,
+	} {
+		if !codexTranscriptTailContainsTurnAborted(tail) {
+			t.Errorf("%s: codexTranscriptTailContainsTurnAborted() = false, want true", name)
+		}
+	}
+	if codexTranscriptTailContainsTurnAborted(tokens) {
+		t.Error("codexTranscriptTailContainsTurnAborted() = true for a tail with no abort, want false")
+	}
+}
