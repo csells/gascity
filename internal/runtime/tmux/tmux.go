@@ -2534,7 +2534,7 @@ func nextPasteBufferName() string {
 }
 
 func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
+	if len(text) > maxSendKeysLiteralLen || t.pastesMultilineText(target, text) {
 		return t.pasteLiteralText(ctx, target, text)
 	}
 	_, err := t.runCtx(ctx, append([]string{"send-keys", "-t", paneTarget(target), "-l"}, runtime.TmuxLiteralArgs(text)...)...)
@@ -2542,6 +2542,16 @@ func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
 		return t.pasteLiteralText(ctx, target, text)
 	}
 	return err
+}
+
+// pastesMultilineText reports whether text must reach target as one bracketed
+// paste even under maxSendKeysLiteralLen. Codex (codex-cli 0.162.1) reads
+// typed multi-line text as a paste burst and takes the submit Enter that
+// follows as one more newline, so the message stays drafted in its composer:
+// every Mayor startup prompt did. A bracketed paste arrives as one paste, and
+// the Enter after it submits.
+func (t *Tmux) pastesMultilineText(target, text string) bool {
+	return strings.Contains(text, "\n") && sessionlog.ProviderFamily(t.providerEnv(target)) == "codex"
 }
 
 func (t *Tmux) pasteLiteralText(ctx context.Context, target, text string) error {
