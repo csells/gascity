@@ -3,7 +3,6 @@ package tmux
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -49,7 +48,7 @@ func (p *codexPaneSessionProvider) Interrupt(name string) error {
 // Codex does when an interrupt lands.
 func (p *codexPaneSessionProvider) recordTurnAborted() {
 	p.t.Helper()
-	rollout := filepath.Join(p.pane.codexHome, "sessions", "2026", "10", "12", "rollout.jsonl")
+	rollout := p.pane.rollout
 	f, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		p.t.Fatalf("opening rollout: %v", err)
