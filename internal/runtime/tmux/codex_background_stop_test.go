@@ -44,14 +44,16 @@ var (
 // turn is still busy, then the interrupted pane, with the background-terminal
 // row while a terminal runs. Typing /stop and pressing Enter in the composer
 // stops the background terminals the way Codex does, after
-// stopAfterCaptures more captures (never, with ignoreStop). Its CODEX_HOME
-// holds a rollout whose tail already records the turn as aborted, so the
-// interrupt boundary is reached on the first look.
+// stopAfterCaptures more captures (never, with ignoreStop). Its Codex holds
+// open a rollout (under ~/.codex, with no CODEX_HOME, as a stock deployment
+// has) whose tail already records the turn as aborted, so the interrupt
+// boundary is reached on the first look.
 type fakeCodexPane struct {
 	mu sync.Mutex
 
-	provider  string
-	codexHome string
+	provider string
+	// rollout is the file the pane's Codex holds open (heldRollout).
+	rollout string
 
 	// busyCaptures is how many captures still show the Working row.
 	busyCaptures int
@@ -76,7 +78,7 @@ type fakeCodexPane struct {
 func newFakeCodexPane(t *testing.T) *fakeCodexPane {
 	t.Helper()
 	home := t.TempDir()
-	rollout := filepath.Join(home, "sessions", "2026", "10", "12", "rollout.jsonl")
+	rollout := filepath.Join(home, ".codex", "sessions", "2026", "10", "12", "rollout-2026-10-12T19-46-33-01a1d9e2-7c41-7a10-9d55-3b6a1f0c2e41.jsonl")
 	if err := os.MkdirAll(filepath.Dir(rollout), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -84,7 +86,16 @@ func newFakeCodexPane(t *testing.T) *fakeCodexPane {
 	if err := os.WriteFile(rollout, []byte(aborted), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	return &fakeCodexPane{provider: "codex", codexHome: home, background: 1}
+	return &fakeCodexPane{provider: "codex", rollout: rollout, background: 1}
+}
+
+// heldRollout answers the open-file lookup for the pane's process tree
+// (fakeAgentPaneRow's pane PID 4242): the rollout its Codex holds open.
+func (f *fakeCodexPane) heldRollout(panePID int) string {
+	if panePID != 4242 {
+		return ""
+	}
+	return f.rollout
 }
 
 func (f *fakeCodexPane) render(escapes bool) []string {
@@ -118,11 +129,8 @@ func (f *fakeCodexPane) execute(args []string) (string, error) {
 	}
 	switch tmuxSubcommand(args) {
 	case "show-environment":
-		switch {
-		case slices.Contains(args, "GC_PROVIDER"):
+		if slices.Contains(args, "GC_PROVIDER") {
 			return "GC_PROVIDER=" + f.provider, nil
-		case slices.Contains(args, "CODEX_HOME"):
-			return "CODEX_HOME=" + f.codexHome, nil
 		}
 		return "", errors.New("unknown variable")
 	case "display-message":
@@ -235,6 +243,7 @@ func newCodexStopTmux(pane *fakeCodexPane) *Tmux {
 	tm := NewTmux()
 	tm.exec = pane
 	tm.codexStopSleep = pane.sleep
+	tm.codexRolloutHeld = pane.heldRollout
 	return tm
 }
 
@@ -405,5 +414,61 @@ func TestNonCodexStopBackgroundWorkIsUnsupported(t *testing.T) {
 	}
 	if got := pane.typedOrPressed(); len(got) != 0 {
 		t.Fatalf("keys reaching a Claude pane = %q, want none", got)
+	}
+}
+
+// codexAbortedRow is the rollout row Codex writes when an interrupt lands.
+const codexAbortedRow = `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n"
+
+// TestCodexInterruptBoundaryReadsTheSessionsOwnRollout: Codex sessions
+// commonly share one home (~/.codex, no CODEX_HOME), so the newest rollout
+// there can be another session's. The boundary an interrupt_now submit waits
+// for is read from the rollout this session's Codex holds open: another
+// session's newer turn_aborted does not end the wait, and this session's does.
+func TestCodexInterruptBoundaryReadsTheSessionsOwnRollout(t *testing.T) {
+	pane := newFakeCodexPane(t)
+	if err := os.WriteFile(pane.rollout, []byte(`{"type":"event_msg","payload":{"type":"task_started"}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	other := filepath.Join(filepath.Dir(pane.rollout), "rollout-2026-10-12T19-46-40-01a1d9e2-0000-7000-8000-000000000002.jsonl")
+	if err := os.WriteFile(other, []byte(codexAbortedRow), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	newest := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, newest, newest); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	tm := newCodexStopTmux(pane)
+	since := time.Now().Add(-time.Minute)
+
+	if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-g", since, 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("WaitForInterruptBoundary = %v, want ErrIdleTimeout: only another session's rollout records an abort", err)
+	}
+
+	f, err := os.OpenFile(pane.rollout, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := f.WriteString(codexAbortedRow); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	_ = f.Close()
+	if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-g", since, time.Second); err != nil {
+		t.Fatalf("WaitForInterruptBoundary = %v, want nil: this session's rollout records the abort", err)
+	}
+}
+
+// TestCodexInterruptBoundaryWithoutItsOwnRolloutIsUnsupported: a session
+// whose rollout cannot be named (none held open, two held in its process
+// tree, or open files that cannot be read) has no boundary to wait for; the
+// wait reports runtime.ErrInteractionUnsupported at once rather than reading
+// another session's rollout.
+func TestCodexInterruptBoundaryWithoutItsOwnRolloutIsUnsupported(t *testing.T) {
+	pane := newFakeCodexPane(t)
+	tm := newCodexStopTmux(pane)
+	tm.codexRolloutHeld = func(int) string { return "" }
+
+	if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-g", time.Now().Add(-time.Minute), time.Minute); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("WaitForInterruptBoundary = %v, want runtime.ErrInteractionUnsupported", err)
 	}
 }

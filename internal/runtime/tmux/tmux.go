@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	goruntime "runtime"
 	"slices"
@@ -5440,26 +5439,27 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 	if strings.TrimSpace(provider) == "" && !t.targetLooksLikeProvider(session, "codex") {
 		return runtime.ErrInteractionUnsupported
 	}
-	codexHome, err := t.GetEnvironment(session, "CODEX_HOME")
-	if err != nil {
+	// The boundary is read from the rollout the session's own Codex holds
+	// open (see codexRolloutOf), never the newest rollout under a home that
+	// other sessions share. A session whose rollout cannot be named has no
+	// boundary to wait for, as before when it had no CODEX_HOME.
+	rollout := t.codexRolloutOf(session)
+	if rollout == "" {
 		return runtime.ErrInteractionUnsupported
 	}
-	codexHome = strings.TrimSpace(codexHome)
-	if codexHome == "" {
-		return runtime.ErrInteractionUnsupported
-	}
-	return waitForCodexInterruptBoundary(ctx, codexHome, since, timeout)
+	return waitForCodexInterruptBoundary(ctx, rollout, since, timeout)
 }
 
-func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since time.Time, timeout time.Duration) error {
+// waitForCodexInterruptBoundary waits until the Codex rollout at path,
+// written since since, records the interrupted turn's turn_aborted marker.
+func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.Time, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		transcriptPath, modTime, err := latestCodexTranscriptPath(codexHome)
-		if err == nil && !modTime.Before(since) {
-			tail, err := readFileTail(transcriptPath, codexInterruptBoundaryTailBytes)
+		if info, err := os.Stat(path); err == nil && !info.ModTime().Before(since) {
+			tail, err := readFileTail(path, codexInterruptBoundaryTailBytes)
 			if err == nil && codexTranscriptTailContainsTurnAborted(tail) {
 				return nil
 			}
@@ -5469,36 +5469,6 @@ func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since 
 		}
 	}
 	return ErrIdleTimeout
-}
-
-func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
-	root := filepath.Join(codexHome, "sessions")
-	var latestPath string
-	var latestMod time.Time
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if latestPath == "" || info.ModTime().After(latestMod) {
-			latestPath = path
-			latestMod = info.ModTime()
-		}
-		return nil
-	})
-	if latestPath == "" {
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		return "", time.Time{}, os.ErrNotExist
-	}
-	return latestPath, latestMod, nil
 }
 
 func readFileTail(path string, maxBytes int64) (_ string, err error) {
