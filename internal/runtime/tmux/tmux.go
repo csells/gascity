@@ -4,6 +4,7 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -5462,6 +5463,11 @@ func readFileTail(path string, maxBytes int64) (_ string, err error) {
 	return string(buf), nil
 }
 
+// codexTranscriptTailContainsTurnAborted reports whether one of the last
+// codexInterruptBoundaryRecentLines rollout rows records an interrupted turn.
+// Codex has recorded it as a <turn_aborted> user message and, since
+// codex-cli 0.162.1, as a <turn_aborted> developer message followed by a
+// turn_aborted event.
 func codexTranscriptTailContainsTurnAborted(tail string) bool {
 	lines := strings.Split(strings.TrimSpace(tail), "\n")
 	seen := 0
@@ -5471,15 +5477,31 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 			continue
 		}
 		seen++
+		if codexRowIsTurnAbortedEvent(line) {
+			return true
+		}
 		if !strings.Contains(line, "<turn_aborted>") {
 			continue
 		}
 		if strings.Contains(line, `"role":"user"`) || strings.Contains(line, `"role": "user"`) ||
+			strings.Contains(line, `"role":"developer"`) || strings.Contains(line, `"role": "developer"`) ||
 			strings.Contains(line, `"type":"user_message"`) || strings.Contains(line, `"type": "user_message"`) {
 			return true
 		}
 	}
 	return false
+}
+
+// codexRowIsTurnAbortedEvent reports whether a rollout row is Codex's
+// turn_aborted event.
+func codexRowIsTurnAbortedEvent(line string) bool {
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	return json.Unmarshal([]byte(line), &row) == nil && row.Type == "event_msg" && row.Payload.Type == "turn_aborted"
 }
 
 // claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
