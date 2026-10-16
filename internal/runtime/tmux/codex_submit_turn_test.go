@@ -53,6 +53,15 @@ type codexTurnPane struct {
 	// swallowEnters is how many Enters the composer takes as a newline instead
 	// of a submit (#4706: codex reads a lone Enter inside a paste burst so).
 	swallowEnters int
+	// burstEatsEnter plays codex-cli 0.162.1 (live Mayor frames, 2026-10-16):
+	// typed multi-line text is a paste burst the composer does not show yet,
+	// and the Enter after it is one more newline, not a submit. The burst
+	// appears in the composer codexBurstFlush after that Enter. A bracketed
+	// paste is not a burst.
+	burstEatsEnter bool
+	burst          string
+	// buffers holds tmux paste buffers loaded with load-buffer.
+	buffers map[string]string
 
 	draft     string
 	running   bool
@@ -218,6 +227,13 @@ func (f *codexTurnPane) render(escapes bool) []string {
 	if f.running && time.Since(f.turnStart) >= f.busyHiddenFor {
 		lines = append(lines, "• Working (1s • esc to interrupt)", "")
 	}
+	if rows := strings.Split(f.draft, "\n"); len(rows) > codexComposerRows {
+		// A draft taller than the composer scrolls, as live: the prompt row
+		// can show a blank line of the draft, with the scroll arrow.
+		lines = append(lines, codexPromptPrefix+strings.Repeat(" ", 70)+"↑")
+		lines = append(lines, rows[len(rows)-codexComposerRows+1:]...)
+		return append(lines, "", "  gpt-6.1-sol low · ~/w")
+	}
 	composer := codexPromptPrefix + f.draft
 	if f.draft == "" {
 		placeholder := "Ask Codex to do anything"
@@ -256,6 +272,19 @@ func (f *codexTurnPane) execute(args []string) (string, error) {
 		return strings.Join(f.render(slices.Contains(args, "-e")), "\n"), nil
 	case "send-keys":
 		f.sendKeys(args)
+	case "load-buffer":
+		data, err := os.ReadFile(args[len(args)-1])
+		if err != nil {
+			return "", err
+		}
+		if f.buffers == nil {
+			f.buffers = map[string]string{}
+		}
+		f.buffers[args[slices.Index(args, "-b")+1]] = string(data)
+	case "paste-buffer":
+		text := f.buffers[args[slices.Index(args, "-b")+1]]
+		f.events = append(f.events, "paste:"+text)
+		f.draft += text
 	}
 	return "", nil
 }
@@ -283,6 +312,10 @@ func (f *codexTurnPane) sendKeys(args []string) {
 	if literal {
 		text := strings.Join(keys, " ")
 		f.events = append(f.events, "type:"+text)
+		if f.burstEatsEnter && strings.Contains(text, "\n") {
+			f.burst += text
+			return
+		}
 		f.draft += text
 		return
 	}
@@ -300,6 +333,14 @@ func (f *codexTurnPane) sendKeys(args []string) {
 			switch {
 			case f.swallowEnters > 0:
 				f.swallowEnters--
+			case f.burst != "":
+				flushed := f.burst + "\n"
+				f.burst = ""
+				f.timers = append(f.timers, time.AfterFunc(codexBurstFlush, func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					f.draft += flushed
+				}))
 			case !f.running && f.draft != "":
 				text := f.draft
 				f.draft = ""
@@ -331,7 +372,12 @@ func (f *codexTurnPane) snapshot() (recorded []string, aborted int, events []str
 // runCodexTurnNudge delivers message through NudgeSession to a pane set up by
 // setup, inside a synctest bubble so every wait takes virtual time only.
 func runCodexTurnNudge(t *testing.T, session string, setup func(*codexTurnPane)) (*codexTurnPane, error) {
-	message := codexTurnMarker
+	t.Helper()
+	return runCodexTurnNudgeMessage(t, session, codexTurnMarker, setup)
+}
+
+// runCodexTurnNudgeMessage is runCodexTurnNudge for a given message.
+func runCodexTurnNudgeMessage(t *testing.T, session, message string, setup func(*codexTurnPane)) (*codexTurnPane, error) {
 	t.Helper()
 	// The bubble creates this session's nudge lock channel; drop it so
 	// nothing outside the bubble ever touches it.
@@ -352,6 +398,81 @@ func runCodexTurnNudge(t *testing.T, session string, setup func(*codexTurnPane))
 }
 
 const codexTurnMarker = "Reply with exactly FIRST_SUBMIT_MARKER. Do not use tools or change files."
+
+// codexComposerRows is how many draft rows the fake Codex composer shows
+// before it scrolls.
+const codexComposerRows = 8
+
+// codexBurstFlush is how long after the Enter a typed burst takes to appear
+// in the composer: on the loaded live host it came after the confirm loop had
+// already read the composer as drained.
+const codexBurstFlush = 3 * time.Second
+
+// codexMayorPrompt is shaped like the stock Mayor's startup prompt: a
+// multi-line Markdown message far taller than the composer.
+var codexMayorPrompt = "[city] mayor • 2026-10-16T02:02:32\n# Mayor\n" + strings.Repeat("You are the mayor of this Gas City workspace.\n\n## Commands\nUse `/gc-work` to load command reference.\n", 6) + "Reply with exactly MAYOR_STARTUP_MARKER."
+
+// TestCodexMultilineMessageArrivesAsOnePaste is the Mayor startup defect
+// (codex-cli 0.162.1, every stock Mayor start since 2026-10-13): the
+// multi-line startup prompt was typed with send-keys, Codex read it as a paste
+// burst and took the submit Enter as one more newline, and the composer,
+// still empty while Codex held the burst, was what the confirm loop
+// read as drained before the burst appeared. The submit was credited and the
+// prompt sat drafted. A multi-line message to Codex arrives as one bracketed
+// paste, and the Enter after it submits.
+func TestCodexMultilineMessageArrivesAsOnePaste(t *testing.T) {
+	pane, err := runCodexTurnNudgeMessage(t, "codex-multiline-submit", codexMayorPrompt, func(p *codexTurnPane) {
+		p.burstEatsEnter = true
+	})
+	if err != nil {
+		t.Fatalf("NudgeSession = %v, want nil: Codex recorded the prompt", err)
+	}
+	recorded, _, events := pane.snapshot()
+	if !slices.Equal(recorded, []string{codexMayorPrompt}) {
+		t.Fatalf("Codex recorded %q, want the prompt once; events %q", recorded, events)
+	}
+	if !slices.Contains(events, "paste:"+codexMayorPrompt) {
+		t.Fatalf("events %q, want the prompt as one bracketed paste", events)
+	}
+}
+
+// TestCodexSingleLineMessageIsStillTyped: a one-line message is not a paste
+// burst, so it is still typed.
+func TestCodexSingleLineMessageIsStillTyped(t *testing.T) {
+	pane, err := runCodexTurnNudge(t, "codex-single-line-submit", func(p *codexTurnPane) {
+		p.burstEatsEnter = true
+	})
+	if err != nil {
+		t.Fatalf("NudgeSession = %v, want nil", err)
+	}
+	if _, _, events := pane.snapshot(); !slices.Contains(events, "type:"+codexTurnMarker) {
+		t.Fatalf("events %q, want the one-line message typed", events)
+	}
+}
+
+// A Codex draft taller than the composer scrolls, and the prompt row can show
+// a blank line of it next to the scroll arrow (rows captured from the live
+// Mayor pane, 2026-10-16T02:02:54Z). That is a held draft, not a drained
+// composer: the arrow is the row's remainder.
+func TestCodexScrolledDraftIsNotADrainedComposer(t *testing.T) {
+	scrolled := []string{
+		"• I’m ready to manage the Gas City workspace. Tell me what you’d like me to",
+		"  plan, dispatch, or monitor.",
+		"  Worked for 21s • Oct 14 at 03:37",
+		"›                                                                              ↑",
+		"  Note: those `/gc-*` entries name skills exposed by your provider's command",
+		"  palette, not bash commands.",
+		"  GPT-6-Luna medium · ~/city · Plan Gas City workspace",
+		"                                                       ⚠ 1 warning · f2 to view",
+	}
+	if paneShowsDrainedComposer(scrolled) {
+		t.Fatal("paneShowsDrainedComposer = true for a scrolled draft, want false")
+	}
+	bare := append(append([]string(nil), scrolled[:3]...), "› ", "  GPT-6-Luna medium · ~/city · Plan Gas City workspace")
+	if !paneShowsDrainedComposer(bare) {
+		t.Fatal("paneShowsDrainedComposer = false for a bare composer, want true")
+	}
+}
 
 // TestCodexSubmitLeavesTheTurnItStartedRunning is the live defect
 // (healthy-direct, 2026-10-15): GC's Escape+Enter started the Codex turn
