@@ -2543,174 +2543,133 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 	// foreign target lands in the same best-effort branch below (empty identity,
 	// runtime treated as active, proceed to handle.Kill) that beadErr != nil used.
 	info, infoErr := sessionFrontDoor(sessStore).Get(sessionID)
-	identity := ""
-	if infoErr == nil {
-		identity = namedSessionIdentityInfo(info)
-	}
 
 	handle, err := sessionKillHandle(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// An open row is killed under the kill fence (KillFenced below). A handle
-	// that cannot fence the kill fails it rather than stopping unfenced.
-	fenced, canFence := handle.(worker.FencedKillHandle)
-	if infoErr == nil && !info.Closed && !canFence {
-		fmt.Fprintf(stderr, "gc session kill: session %s: handle %T cannot fence the kill\n", sessionID, handle) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	// runtimeAlreadyInactive here, before the lease, gates only the
-	// live-subagent refusal; the kill decides it again on a fresh read under
-	// the lease (KillFencedReport), and that decision is the one acted on.
-	// Both read the runtime the bead routes to.
-	runtimeAlreadyInactive := false
-	if infoErr == nil && canFence {
-		runtimeAlreadyInactive, _ = fenced.KillRuntimeGone(context.Background())
-	}
-	if !force && !runtimeAlreadyInactive && refuseKillForLiveSubagents("gc session kill", workerHandleForSessionTargetWithConfig, cityPath, sessStore, sp, cfg, sessionID, stderr) {
-		return 1
-	}
-
+	// The kill is worker.OperatorKill, the same protocol the API's session
+	// kill runs: the live-subagent refusal (--force overrides it), the runtime
+	// lease held from the fence write through the stop and the asleep sync
+	// (I-LEASE; a controller mid-start keeps it for up to
+	// RuntimeLeaseOperatorWait, after which the kill fails retryably, O3, and
+	// --force also overrides a hung holder of the flock whose record expired),
+	// the kill fence recorded BEFORE the runtime is torn down (stopping first
+	// let a controller tick read the kill as a crash), the named-session
+	// circuit-breaker clear, the controller poke after the lease ends, and
+	// session.stopped with the stop metric. A closed row has no fence and no
+	// lifecycle to sync: the kill only stops whatever runtime it left behind.
+	// Its warnings are this command's.
+	//
 	// The kill op (DES-O0API §8.4) is scoped to the generation the row
 	// already loaded names, and proposed after the live-subagent refusal,
-	// before the lease and the fence. A row that did not read, or read with
-	// no generation, is not recordable.
+	// before the lease and the fence (Admit). A row that did not read, or read
+	// with no generation, is not recordable. A recorded kill stops only the
+	// generation its op is scoped to: a start that ran while the kill waited
+	// for the lease has made another run, which the kill refuses (Check)
+	// rather than stop under an op that does not name it. The op closes only
+	// after the lease is released, so no op store write runs under it.
 	scope, unrecordable, unrecordableErr := cliOpSessionScope(info, infoErr)
 	var unreplayed []string
 	if force {
 		unreplayed = []string{"--force"}
 	}
-	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
-		verb: "gc session kill", kind: opjournal.KindKill, key: key, conversation: sessionID,
-		scope: scope, unrecordable: unrecordable, unrecordableErr: unrecordableErr, cfgErr: cfgErr, unreplayed: unreplayed,
-		asJSON: asJSON, stdout: stdout, stderr: stderr,
+	var (
+		op                             *cliOp
+		start                          cliOpStart
+		leaseErr, scopeErr, breakerErr error
+	)
+	_, killErr := worker.OperatorKill(context.Background(), worker.OperatorKillRequest{
+		SessionID: sessionID,
+		Handle:    handle,
+		Info:      info,
+		InfoErr:   infoErr,
+		By:        sessionActor(session.ActorOperator, cityPath),
+		Force:     force,
+		LiveSubagents: func(ctx context.Context) ([]worker.InFlightSubagent, error) {
+			guard, err := workerHandleForSessionTargetWithConfig(cityPath, sessStore, sp, cfg, sessionID)
+			if err != nil {
+				return nil, err
+			}
+			return liveSubagentsForKill(ctx, guard)
+		},
+		Admit: func() error {
+			op, start = startCLIOp(cfg, sessStore, cliOpRequest{
+				verb: "gc session kill", kind: opjournal.KindKill, key: key, conversation: sessionID,
+				scope: scope, unrecordable: unrecordable, unrecordableErr: unrecordableErr, cfgErr: cfgErr, unreplayed: unreplayed,
+				asJSON: asJSON, stdout: stdout, stderr: stderr,
+			})
+			if start == cliOpRefused || start == cliOpReplayed {
+				return errSessionKillOpAnswered
+			}
+			return nil
+		},
+		Lease: func(ctx context.Context, force bool) (*session.RuntimeLease, bool, error) {
+			req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
+			lease, overridden, err := killRuntimeLease(ctx, sessionFrontDoor(sessStore), req, force, stderr)
+			leaseErr = err
+			return lease, overridden, err
+		},
+		Check: func() error {
+			scopeErr = op.killScopeMoved(sessionFrontDoor(sessStore), sessionID)
+			return scopeErr
+		},
+		ResetCircuitBreaker: func(identity string) error {
+			breakerErr = resetSessionCircuitBreakerAfterExplicitKill(cityPath, sessStore, sessionID, identity)
+			return breakerErr
+		},
+		Settled: func(res worker.OperatorKillResult) {
+			outcome := sessionVerbSentinels.SyncResult(opjournal.KindKill, nil, true).Outcome
+			if res.AlreadyInactive {
+				// The runtime was already gone: nothing was killed.
+				outcome = opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}
+			}
+			op.finishOutcome(outcome)
+		},
+		Poke: func() error { return sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)) },
+		// Use the resolved session ID as the canonical Subject for event
+		// consumers. This ensures a stable key regardless of how the user
+		// specified the target (session ID or alias). The recorder opens only
+		// once the kill has landed, as it did before the kill moved.
+		Recorder:   lazyRecorder(func() events.Recorder { return openCityRecorder(stderr) }),
+		EventActor: eventActor(),
+		RecordStop: func() { recordSessionKillStop(info, infoErr, cfg) },
+		Warn:       func(msg string) { fmt.Fprintf(stderr, "gc session kill: warning: %s\n", msg) }, //nolint:errcheck // best-effort stderr
+		Now:        time.Now,
 	})
-	switch start {
-	case cliOpRefused:
-		return 1
-	case cliOpReplayed:
+	var refused *worker.LiveSubagentsError
+	switch {
+	case errors.Is(killErr, errSessionKillOpAnswered) && start == cliOpReplayed:
 		return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
+	case errors.Is(killErr, errSessionKillOpAnswered):
+		return 1
+	case errors.As(killErr, &refused):
+		printLiveSubagentRefusal("gc session kill", refused.Subagents, refused.At, stderr)
+		return 1
 	}
 	defer op.end()
-
-	// Record the kill intent BEFORE tearing the runtime down. Stopping first left
-	// a window in which the row still claimed a live runtime next to a dead one,
-	// and a controller tick landing there handled the kill as a crash: it
-	// cleared the conversation's resume key and queued a continuation-reset
-	// restart, or reaped a lingering dead pane's bead as a dead-runtime corpse.
-	// The fence (state_reason=kill-pending) also keeps the reverse window safe:
-	// while Stop runs, the row reads asleep next to a still-live runtime, and
-	// the controller leaves a fenced row alone instead of healing it back to
-	// awake. A row whose runtime is already gone has no window to close and
-	// keeps the post-kill sync below.
-	// The kill holds the runtime lease from the fence write through the Stop
-	// and the asleep sync (I-LEASE). A controller mid-start keeps it for up
-	// to RuntimeLeaseOperatorWait, after which the kill fails retryably (O3).
-	// --force also overrides a hung holder of the flock whose record expired.
-	// A lease failure other than busy never holds the kill hostage: it stops
-	// under the name's flock alone. The lease ends before the controller poke.
-	killCtx, killBy := context.Background(), sessionActor(session.ActorOperator, cityPath)
-	releaseLease, leaseOverridden := func() {}, false
-	if infoErr == nil && !info.Closed {
-		req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
-		lease, overridden, err := killRuntimeLease(killCtx, sessionFrontDoor(sessStore), req, force, stderr)
-		if err != nil {
-			op.finishErr(err)
-			fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+	if killErr != nil {
+		// OperatorKill released the lease before it returned.
+		switch {
+		case leaseErr != nil:
+			op.finishErr(leaseErr)
+		case scopeErr != nil:
+			op.finishOutcome(cliOpRefusedOutcome(cliOpRefusedTargetMoved))
+		case breakerErr != nil:
+			op.finishErr(breakerErr)
+		default:
+			op.finishOutcome(cliOpKillFailure(killErr))
 		}
-		releaseLease, leaseOverridden = lease.Release, overridden
-		defer releaseLease()
-		killBy.Lease = lease
-	}
-	// A recorded kill stops only the generation its op is scoped to. A start
-	// that ran while the kill waited for the lease has made another run, which
-	// the kill refuses rather than stop under an op that does not name it; the
-	// op closes once the lease is released, as on every other path.
-	if err := op.killScopeMoved(sessionFrontDoor(sessStore), sessionID); err != nil {
-		releaseLease()
-		op.finishOutcome(cliOpRefusedOutcome(cliOpRefusedTargetMoved))
-		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	// The fence, the stop and the asleep sync are Manager.KillFencedReport's,
-	// the same kill the API's routes run: under the lease taken above, it
-	// decides on a fresh read of the row and the runtime whether the runtime
-	// is already gone (no fence, the kill alone), and otherwise writes the
-	// fence before the stop and lifts it after (or rolls it back when the
-	// runtime survived). A fence that cannot be written does not hold the
-	// kill hostage to the store: it falls back to the stop and the post-kill
-	// sync. Its warnings are this command's. A closed row has no fence and no
-	// lifecycle to sync: the kill only stops whatever runtime it left behind.
-	var killErr error
-	if infoErr == nil && !info.Closed {
-		warn := func(msg string) { fmt.Fprintf(stderr, "gc session kill: warning: %s\n", msg) } //nolint:errcheck // best-effort stderr
-		report, err := fenced.KillFenced(killCtx, killBy, warn)
-		killErr, runtimeAlreadyInactive = err, report.RuntimeWasGone
-	} else {
-		killErr = handle.Kill(killCtx, killBy)
-	}
-	// The op closes only after the lease is released, so no op store write
-	// runs under it.
-	if killErr != nil && (identity == "" || !runtimeAlreadyInactive) {
-		releaseLease()
-		op.finishOutcome(cliOpKillFailure(killErr))
 		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	if infoErr != nil {
-		fmt.Fprintf(stderr, "gc session kill: warning: loading session %s for circuit breaker clear: %v\n", sessionID, infoErr) //nolint:errcheck // best-effort stderr
-	} else if identity != "" {
-		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, sessStore, sessionID, identity); err != nil {
-			fmt.Fprintf(stderr, "gc session kill: warning: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
-			if killErr != nil {
-				releaseLease()
-				op.finishErr(err)
-				fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-		}
-	}
-	outcome := sessionVerbSentinels.SyncResult(opjournal.KindKill, nil, true).Outcome
-	if killErr != nil {
-		// The runtime was already gone: nothing was killed.
-		outcome = opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}
-		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
-	}
-
-	// Poke the controller after the asleep sync so the reconciler observes the
-	// killed state immediately instead of waiting a full patrol interval to
-	// revive an always-named session (#3812), the same poke-after-state-write
-	// approach the drain-ack path uses (doRuntimeDrainAck). Best-effort and
-	// unconditional: a poke failure (e.g. no controller running) is non-fatal,
-	// and a spurious poke when the asleep sync was skipped is harmless — the
-	// reconciler observes unchanged state and continues.
-	releaseLease()
-	op.finishOutcome(outcome)
-	if err := sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)); err != nil {
-		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-
-	// Use the resolved session ID as the canonical Subject for event
-	// consumers. This ensures a stable key regardless of how the user
-	// specified the target (session ID or alias).
-	rec := openCityRecorder(stderr)
-	message := "killed"
-	if leaseOverridden {
-		message = "killed past a hung runtime lease holder (--force)"
-	}
-	rec.Record(events.Event{
-		Type:    events.SessionStopped,
-		Actor:   eventActor(),
-		Subject: sessionID,
-		Message: message,
-		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
-	})
-	recordSessionKillStop(info, infoErr, cfg)
 	return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
 }
+
+// errSessionKillOpAnswered ends gc session kill's OperatorKill once its op's
+// start refused the kill or replayed an earlier one: nothing more runs.
+var errSessionKillOpAnswered = errors.New("gc session kill: answered by its op")
 
 // emitSessionKillResult prints a kill's success output, a replay's included.
 func emitSessionKillResult(stdout, stderr io.Writer, asJSON bool, sessionID string, op *cliOp) int {
@@ -2748,23 +2707,19 @@ func recordSessionKillStop(info session.Info, beadErr error, cfg *config.City) {
 	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentityInfo(info, cfg), "killed", nil)
 }
 
-// killRuntimeLease takes req's runtime lease for `gc session kill`: it waits
-// up to RuntimeLeaseOperatorWait (CONTRACT O3), and with force it then takes
-// the record past a hung flock holder whose record expired (overridden). A
-// failure other than busy never holds the kill hostage: it falls back to the
-// name's flock alone, with a warning.
+// killRuntimeLease is session.KillRuntimeLease for `gc session kill`: it
+// waits through sessionKillWaitLease, and its warning goes to stderr.
 func killRuntimeLease(ctx context.Context, front *session.Store, req session.RuntimeLeaseRequest, force bool, stderr io.Writer) (lease *session.RuntimeLease, overridden bool, err error) {
-	lease, err = sessionKillWaitLease(ctx, front, req)
-	if force && errors.Is(err, session.ErrRuntimeLeaseBusy) {
-		lease, err = session.ForceRuntimeLease(front, req)
-		overridden = err == nil
-	}
-	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
-		fmt.Fprintf(stderr, "gc session kill: warning: stopping %s under the name's flock alone: %v\n", req.Name, err) //nolint:errcheck // best-effort stderr
-		lease, err = session.WaitOperatorRuntimeLease(ctx, nil, session.RuntimeLeaseRequest{City: req.City, Name: req.Name})
-	}
-	return lease, overridden, err
+	return session.KillRuntimeLease(ctx, front, req, force, sessionKillWaitLease, func(msg string) {
+		fmt.Fprintf(stderr, "gc session kill: warning: %s\n", msg) //nolint:errcheck // best-effort stderr
+	})
 }
+
+// lazyRecorder opens its recorder on the first Record, so a command whose
+// event is conditional opens the city's event log only when it records.
+type lazyRecorder func() events.Recorder
+
+func (open lazyRecorder) Record(e events.Event) { open().Record(e) }
 
 // sessionKillHandle builds the worker handle `gc session kill` stops through.
 // A var so a test can hand the command a handle that cannot fence the kill.

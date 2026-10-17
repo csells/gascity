@@ -55,7 +55,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -1038,37 +1037,27 @@ func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error
 		refusedTargetMoved, id, now.Generation, adm.Op.Scope.Generation, adm.Op.ID, errKillTargetMoved)
 }
 
-// recordedKillLease takes the runtime lease a recorded kill checks its scope
-// under: the lease is held from before the generation check through the
-// fence's stop and asleep sync (I-LEASE), so a start cannot slip a new run in
-// between. A closed row keeps no lease record, so its kill takes the runtime
-// name's flock alone, which holds off a reopened row's start all the same. A
-// busy lease is ErrSessionStarting (retryable); any other failure to take an
-// open row's lease takes the name's flock alone rather than hold the kill
-// hostage. A row that does not read is a retryable error, nothing killed. It
-// returns nil, taking none, for a kill that is not recorded at the session's
-// generation, or an actor with no city.
+// recordedKillLease takes the runtime lease a recorded kill of a closed row
+// checks its scope under. The lease is held from before the generation check
+// through the kill (I-LEASE), so a start cannot slip a new run in between. A
+// closed row keeps no lease record, so its kill takes the runtime name's
+// flock alone, which holds off a reopened row's start all the same. An open
+// row's lease is the operator kill's own (Server.operatorKill), taken under
+// the same rule. A row that does not read is a retryable error, nothing
+// killed. It returns nil, taking none, for a kill that is not recorded at the
+// session's generation, an open row, or an actor with no city.
 func (s *Server) recordedKillLease(ctx context.Context, store beads.Store, id string, by session.Actor, adm *legacyop.Admission) (*session.RuntimeLease, error) {
-	if !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession || by.City.IsZero() {
+	if adm == nil || !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession || by.City.IsZero() {
 		return nil, nil
 	}
-	front := session.NewStore(beads.SessionStore{Store: store})
-	info, err := front.Get(id)
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
 	if err != nil {
 		return nil, fmt.Errorf("reading session %s before taking its runtime lease, so nothing was killed: %w", id, err)
 	}
-	flock := session.RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName}
-	if info.Closed {
-		return session.WaitOperatorRuntimeLease(ctx, nil, flock)
+	if !info.Closed {
+		return nil, nil
 	}
-	req := flock
-	req.ID, req.TTL = id, session.RuntimeLeaseTTLFor(s.state.Config())
-	lease, err := session.WaitOperatorRuntimeLease(ctx, front, req)
-	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
-		log.Printf("gc api: session kill: stopping %s under the name's flock alone: %v", info.SessionName, err)
-		lease, err = session.WaitOperatorRuntimeLease(ctx, nil, flock)
-	}
-	return lease, err
+	return session.WaitOperatorRuntimeLease(ctx, nil, session.RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName})
 }
 
 // killOpResult is a kill's op result: a moved target closes

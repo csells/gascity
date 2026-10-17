@@ -89,9 +89,18 @@ type SessionIDInput struct {
 	ID string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 }
 
+// SessionKillInput is the Huma input for POST
+// /v0/city/{cityName}/session/{id}/kill.
+type SessionKillInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Force          bool   `query:"force" required:"false" doc:"Kill even when the session has live background subagents, or past a hung holder of its runtime lease whose record expired, as gc session kill --force does."`
+}
+
 // SessionControlInput is the Huma input for body-less session control and
 // lifecycle endpoints that honor Idempotency-Key (POST .../session/{id}/wake,
-// .../kill, .../suspend and .../reset).
+// .../suspend and .../reset).
 type SessionControlInput struct {
 	CityScope
 	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`

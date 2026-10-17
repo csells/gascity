@@ -1155,11 +1155,13 @@ func (s *Server) humaHandleSessionStop(ctx context.Context, input *SessionStopIn
 // --- Session Kill ---
 
 // humaHandleSessionKill is the Huma-typed handler for POST /v0/session/{id}/kill.
-
-func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
+// The kill is `gc session kill`'s (Server.operatorKill). force is an
+// execution option outside the request's fingerprint, as --force is outside
+// gc session kill's op digest: a same-key retry of a finished kill replays it.
+func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionKillInput) (*OKWithIDResponse, error) {
 	answer, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "kill"), input.IdempotencyKey, sessionControlNoBody{},
 		func() (syncAnswer, error) {
-			return s.killSession(input.ID, input.IdempotencyKey)
+			return s.killSession(input.ID, input.IdempotencyKey, input.Force)
 		})
 	if err != nil {
 		return nil, err
@@ -1169,7 +1171,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionControlI
 
 // killSession kills target's runtime, recorded as a kill op under
 // ops.lifecycle, and returns the answer.
-func (s *Server) killSession(target, key string) (syncAnswer, error) {
+func (s *Server) killSession(target, key string, force bool) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -1180,37 +1182,17 @@ func (s *Server) killSession(target, key string) (syncAnswer, error) {
 		return syncAnswer{}, humaResolveError(err)
 	}
 
-	// Under the kill fence, as `gc session kill`: without it the controller
-	// reads the kill as a crash (heal, accrual, a same-pass restart). A
-	// recorded kill stops only the generation its op is scoped to: the check
-	// runs under the runtime lease (a closed row's included), taken first and
-	// lent to the fence, and before the fence does anything, so a refused kill
-	// leaves the row as it found it.
-	mgr := s.sessionManager(store.Store)
 	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		ctx := context.Background()
-		by := s.actor(session.ActorOperator)
-		lease, err := s.recordedKillLease(ctx, store.Store, id, by, adm)
-		if err != nil {
-			return syncOpResult(opjournal.KindKill, err, adm.Minted), humaSessionManagerError(err)
+		killed, err := s.operatorKill(context.Background(), store.Store, id, force, adm)
+		res := killOpResult(err, adm.Minted)
+		if killed.AlreadyInactive {
+			// A named session's runtime was already gone: nothing was killed.
+			res = legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}}
 		}
-		if lease != nil {
-			// A fenced kill ends a lent lease itself; Release is then a no-op.
-			// It runs before the op closes, so no op write runs under it.
-			defer lease.Release()
-			by.Lease = lease
-		}
-		if err := killScopeMoved(store.Store, id, adm); err != nil {
-			if errors.Is(err, errKillTargetMoved) {
-				return killOpResult(err, adm.Minted), apierr.SessionConflict.Msg(err.Error())
-			}
-			return killOpResult(err, adm.Minted), humaSessionManagerError(err)
-		}
-		err = mgr.KillFenced(ctx, by, id, func(ctx context.Context, by session.Actor) error {
-			return mgr.Kill(ctx, by, id)
-		})
-		res := syncOpResult(opjournal.KindKill, err, adm.Minted)
-		if err != nil && !errors.Is(err, session.ErrSessionClosed) && !errors.Is(err, session.ErrSessionInactive) {
+		switch {
+		case errors.Is(err, errKillTargetMoved):
+			return res, apierr.SessionConflict.Msg(err.Error())
+		case err != nil && !errors.Is(err, session.ErrSessionClosed) && !errors.Is(err, session.ErrSessionInactive):
 			return res, humaSessionManagerError(err)
 		}
 		// A closed session, or one whose runtime is already gone, is already

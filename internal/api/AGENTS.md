@@ -197,13 +197,16 @@ That holds only as far as request IDs tell prompts apart: where the runtime
 derives them from the prompt's content (tmux hashes the tool and its input),
 an identical prompt raised again carries the first one's ID and is answered
 too, until OJ-16 keys respond ops by the interaction occurrence. A
-recorded kill takes the runtime lease first (`recordedKillLease`; on a
-closed row, which keeps no lease record, the runtime name's flock alone),
-checks its op's generation under it, and only then lends the lease to
-`KillFenced`: a kill whose generation is gone refuses
-`refused:target_moved` before the fence, the stop or the asleep sync touches
-anything, and a row that does not read is a retryable error, nothing killed.
-Unlike the API, `gc session kill` takes no lease on a closed row. A
+recorded kill is `gc session kill`'s operator kill (`worker.OperatorKill`,
+through `Server.operatorKill`): it takes the runtime lease first (an open
+row's as `gc session kill` does, `session.KillRuntimeLease`; a closed row's,
+which keeps no lease record, the runtime name's flock alone,
+`recordedKillLease`), checks its op's generation under it
+(`OperatorKillRequest.Check`), and only then lends the lease to the fenced
+kill: a kill whose generation is gone refuses `refused:target_moved` before
+the fence, the stop or the asleep sync touches anything, and a row that does
+not read is a retryable error, nothing killed. Unlike the API,
+`gc session kill` takes no lease on a closed row. A
 `/close?delete=true` op carries `{"delete":true}` as its payload
 (`closeOpRequest`; a plain close carries none, as `gc session close`'s op
 does), so the op's digest covers the delete: reusing a key across `/close`
