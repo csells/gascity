@@ -151,6 +151,7 @@ go_test(
         "mailbox_address_test.go",
         "manager_lease_test.go",
         "manager_states_test.go",
+        "manager_suspend_exit_test.go",
         "manager_test.go",
         "manager_tmux_integration_test.go",
         "mcp_metadata_test.go",

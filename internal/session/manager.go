@@ -1449,7 +1449,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// release no pool name while silently losing the drain. Only a close frees
 		// the name, and CmdClose is already legal from draining.
 		if current == StateDraining && intent == suspendIntentShutdown {
-			return m.tearDownRuntimeForSuspend(sessName)
+			return m.tearDownRuntimeForSuspend(id, sessName)
 		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
@@ -1470,7 +1470,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			if err != nil {
 				return fmt.Errorf("updating suspension state: %w", err)
 			}
-			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+			if err := m.tearDownRuntimeForSuspend(id, sessName); err != nil {
 				// The runtime is still live: restore what the suspend wrote, as
 				// a failed kill's rollback does, so the row never reads
 				// suspended over a live runtime. Decided on a fresh read and
@@ -1486,7 +1486,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			return nil
 		}
 
-		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+		if err := m.tearDownRuntimeForSuspend(id, sessName); err != nil {
 			return err
 		}
 
@@ -1527,17 +1527,71 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 // it would make `gc stop` claim success over a pane that is still alive holding
 // its pool slot name, which is the exact condition this whole change exists to
 // surface.
-func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
+//
+// A suspend's stop is neither a rapid crash nor churn, and either
+// classification would reset the provider conversation (session_key) and
+// count the stop against the session. Both read last_woke_at first, so the
+// wake stamp is cleared before the runtime goes, as an operator's kill and a
+// restart handoff clear it. A stop that cannot be masked is not made, and a
+// failed stop of a live runtime puts the stamp back so a later real crash
+// still counts.
+func (m *Manager) tearDownRuntimeForSuspend(id, sessName string) error {
 	if strings.TrimSpace(sessName) == "" {
 		return nil
 	}
+	lastWokeAt, err := m.clearWakeStampForSuspend(id)
+	if err != nil {
+		return err
+	}
 	running := m.sp.IsRunning(sessName)
-	err := runtime.StopForCleanup(m.sp, sessName)
+	err = runtime.StopForCleanup(m.sp, sessName)
 	if err != nil && !running {
 		err = nil
 	}
 	if err != nil {
-		return fmt.Errorf("stopping runtime session: %w", err)
+		stopErr := fmt.Errorf("stopping runtime session: %w", err)
+		if restoreErr := m.restoreWakeStampAfterSuspend(id, lastWokeAt); restoreErr != nil {
+			return errors.Join(stopErr, restoreErr)
+		}
+		return stopErr
+	}
+	return nil
+}
+
+// clearWakeStampForSuspend clears id's last_woke_at on a fresh read and
+// returns the stamp it cleared ("" when there was none).
+func (m *Manager) clearWakeStampForSuspend(id string) (string, error) {
+	var cleared string
+	wrote, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
+		cleared = info.LastWokeAt
+		if cleared == "" {
+			return nil
+		}
+		return MetadataPatch{"last_woke_at": ""}
+	})
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("clearing the wake stamp before the suspend's stop: %w", err)
+	case cleared != "" && !wrote:
+		return "", fmt.Errorf("clearing the wake stamp before the suspend's stop of session %q: lost to concurrent writes; retry", id)
+	}
+	return cleared, nil
+}
+
+// restoreWakeStampAfterSuspend puts back the wake stamp a failed suspend
+// cleared, only while the row still reads it cleared: a wake since stands.
+func (m *Manager) restoreWakeStampAfterSuspend(id, lastWokeAt string) error {
+	if lastWokeAt == "" {
+		return nil
+	}
+	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
+		if info.LastWokeAt != "" {
+			return nil
+		}
+		return MetadataPatch{"last_woke_at": lastWokeAt}
+	})
+	if err != nil {
+		return fmt.Errorf("restoring the wake stamp after the failed stop: %w", err)
 	}
 	return nil
 }
