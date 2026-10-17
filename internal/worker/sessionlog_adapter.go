@@ -337,27 +337,34 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		}
 	}
 
-	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
-	contextEntries := entries
+	// Detached (Codex) usage belongs to the complete parsed transcript, not to
+	// the moving telemetry tail. Associate it against the full history before
+	// paging, so a page cannot pick up usage for an off-page invocation and an
+	// assistant keeps the usage and model it already showed after later turns
+	// append.
+	contextEntries := normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
+	contextEntries = attachTailUsageToAssistantEntries(contextEntries, fullSession.DetachedUsage)
+	entries := contextEntries
 	if paged {
-		// Pair tool_result blocks whose tool_use is off the current page against
-		// the full session (already read above — no extra I/O), so paginated
-		// structured pages keep typed command/diff/read/task results instead of
-		// degrading to plain text at page boundaries.
-		contextEntries = normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
-	}
-	entries = attachStructuredToolDataWithContext(entries, contextEntries)
-	if beforeID == "" {
-		// Detached (Codex) usage is extracted from the file tail — the newest
-		// turns. It belongs only to a page that includes the tail. On an older
-		// "before" page the tail usages are for newer, off-page turns and would
-		// be mis-attributed onto earlier assistants, so skip attachment there;
-		// those older turns have no tail-extractable usage to show anyway.
-		entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
-		if err != nil {
-			return nil, err
+		entries = normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
+		// A page holds the same entries as the full session, so copy each
+		// one's invocation metadata from its full-history counterpart.
+		fullIndex := make(map[*sessionlog.Entry]int, len(fullSession.Messages))
+		for idx, message := range fullSession.Messages {
+			fullIndex[message] = idx
+		}
+		for idx, message := range session.Messages {
+			if full, ok := fullIndex[message]; ok {
+				entries[idx].Model = contextEntries[full].Model
+				entries[idx].Usage = contextEntries[full].Usage
+			}
 		}
 	}
+	// Pair tool_result blocks whose tool_use is off the current page against
+	// the full session (already read above — no extra I/O), so paginated
+	// structured pages keep typed command/diff/read/task results instead of
+	// degrading to plain text at page boundaries.
+	entries = attachStructuredToolDataWithContext(entries, contextEntries)
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
 	tailMeta, err := historyTailMeta(req.Provider, path)
@@ -528,22 +535,6 @@ func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySys
 		Code:     event.Code,
 		Message:  event.Message,
 	}
-}
-
-func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
-	if sessionlog.IsACPCapturePath(path) {
-		// An ACP capture carries its usage on the turn's entries.
-		return entries, nil
-	}
-	family, supported := InvocationUsageFamily(provider)
-	if !supported || family != "codex" {
-		return entries, nil
-	}
-	usages, err := sessionlog.ExtractCodexTailUsage(path)
-	if err != nil {
-		return nil, fmt.Errorf("extract codex tail usage: %w", err)
-	}
-	return attachTailUsageToAssistantEntries(entries, usages), nil
 }
 
 func attachTailUsageToAssistantEntries(entries []HistoryEntry, usages []sessionlog.TailUsage) []HistoryEntry {

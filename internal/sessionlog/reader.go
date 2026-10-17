@@ -24,6 +24,13 @@ type Session struct {
 	// progress hooks) are filtered out.
 	Messages []*Entry
 
+	// DetachedUsage holds per-invocation usage records that the provider
+	// writes apart from its assistant messages (Codex token_count events),
+	// parsed from this complete file. Consumers associate them against the
+	// full message list before paging so a page boundary or a later append
+	// cannot move them onto a different assistant.
+	DetachedUsage []TailUsage
+
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
 

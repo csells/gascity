@@ -737,3 +737,39 @@ func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]
 	}
 	return ExtractCodexTailUsage(safePath)
 }
+
+// codexHistoryUsage returns one TailUsage per Codex invocation from the
+// records the full transcript parser already read, in file order. Unlike
+// ExtractCodexTailUsage it covers the whole rollout, so usage does not
+// disappear once its records scroll past the telemetry tail window. The first
+// observation of each cumulative total fixes the invocation's timestamp and
+// model: the CLI re-emits the prior turn's final snapshot after the next
+// turn_context, and that duplicate must not move the usage onto a newer
+// assistant message or relabel it with the next turn's model.
+func codexHistoryUsage(entries []codexEntry) []TailUsage {
+	var usages []TailUsage
+	seen := make(map[string]bool)
+	model := ""
+	for _, entry := range entries {
+		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
+			continue
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.raw.Payload, &payload) != nil {
+			continue
+		}
+		if entry.raw.Type == "turn_context" {
+			if payload.Model != "" {
+				model = payload.Model
+			}
+			continue
+		}
+		usage, ok := codexTokenCountUsage(entry.raw, payload, model)
+		if !ok || seen[usage.MessageID] {
+			continue
+		}
+		seen[usage.MessageID] = true
+		usages = append(usages, usage)
+	}
+	return usages
+}
