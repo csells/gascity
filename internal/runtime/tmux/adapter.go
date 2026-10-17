@@ -323,7 +323,8 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends Ctrl-C to the named tmux session.
+// Interrupt sends Ctrl-C to the named tmux session, or Escape when its agent
+// pane shows a Claude permission prompt (see interruptAgentPane).
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
 	return p.interrupt(context.Background(), name)
@@ -347,12 +348,30 @@ func (p *Provider) interrupt(ctx context.Context, name string) error {
 	// whatever a human is running in another window or split.
 	target, err := p.tm.agentPaneTarget(name)
 	if err == nil {
-		err = p.tm.sendKeysRawCtx(ctx, target, "C-c")
+		err = p.tm.interruptAgentPane(ctx, target)
 	}
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return absorbGone(ctx, err)
 	}
 	return err
+}
+
+// interruptAgentPane interrupts the agent in the resolved pane target. A
+// Claude permission prompt (parseApprovalPrompt) is canceled with Escape, the
+// key its footer advertises: Ctrl-C leaves the menu up, so the turn never
+// returns to the composer and the approval stays pending, and any other key
+// could answer the menu. A pane that cannot be observed gets no key at all.
+func (t *Tmux) interruptAgentPane(ctx context.Context, target string) error {
+	approval, err := t.approvalInPane(target)
+	if err != nil {
+		return fmt.Errorf("observing the agent pane before interrupt: %w", err)
+	}
+	if approval != nil && !approval.Codex {
+		// Escape in copy mode would only leave copy mode.
+		t.cancelCopyModeIfParked(ctx, target)
+		return t.sendKeysRawCtx(ctx, target, "Escape")
+	}
+	return t.sendKeysRawCtx(ctx, target, "C-c")
 }
 
 // absorbGone is the best-effort answer to a session or server that is gone:

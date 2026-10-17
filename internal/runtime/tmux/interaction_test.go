@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -1191,5 +1192,101 @@ func TestParseApprovalPrompt_WrappedQuestionStopsAtTheMenu(t *testing.T) {
 	}
 	if strings.Contains(a.Question, "Yes") || strings.Contains(a.Question, "╌") {
 		t.Errorf("Question = %q, want only the question rows", a.Question)
+	}
+}
+
+// interruptKeys returns the keys each send-keys call carried, in order.
+func interruptKeys(calls [][]string) []string {
+	var keys []string
+	for _, call := range calls {
+		if tmuxSubcommand(call) == "send-keys" {
+			keys = append(keys, call[len(call)-1])
+		}
+	}
+	return keys
+}
+
+// captureFailingExecutor is markedAgentPaneExecutor with a failing capture.
+type captureFailingExecutor struct {
+	markedAgentPaneExecutor
+	captureErr error
+}
+
+func (e *captureFailingExecutor) execute(args []string) (string, error) {
+	if tmuxSubcommand(args) == "capture-pane" {
+		e.calls = append(e.calls, args)
+		return "", e.captureErr
+	}
+	return e.markedAgentPaneExecutor.execute(args)
+}
+
+func (e *captureFailingExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// Interrupting a Claude turn that is waiting on a permission prompt cancels
+// the prompt with Escape, the key its footer advertises, and never sends
+// Ctrl-C (which leaves the menu up) or a menu answer. Other panes still get
+// Ctrl-C.
+func TestInterruptCancelsPendingApprovalWithEscape(t *testing.T) {
+	for _, tc := range []struct {
+		name, pane string
+		inMode     string
+		want       []string
+	}{
+		{"approval", readApprovalFixture(t, "edit-80x24.txt"), "0", []string{"Escape"}},
+		{"approval in copy mode", readApprovalFixture(t, "edit-80x24.txt"), "1", []string{"cancel", "Escape"}},
+		{"busy turn", "✻ Working… (esc to interrupt)\n❯ ", "0", []string{"C-c"}},
+		{"approval answered", readApprovalFixture(t, "idle-after-approve.txt"), "0", []string{"C-c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &markedAgentPaneExecutor{capture: tc.pane, inMode: tc.inMode}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := (&Provider{tm: tm}).Interrupt("w"); err != nil {
+				t.Fatalf("Interrupt: %v", err)
+			}
+			got := interruptKeys(exec.calls)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("interrupt keys = %q, want %q; calls=%q", got, tc.want, exec.calls)
+			}
+			for _, target := range targetsOf(exec.calls, "send-keys") {
+				if target != "=w:@2.%5" {
+					t.Errorf("send-keys -t %q, want the agent pane =w:@2.%%5", target)
+				}
+			}
+		})
+	}
+}
+
+// An interrupt that cannot see whether a permission prompt is up sends
+// nothing, since Ctrl-C would leave a prompt pending; a session that is gone
+// stays best-effort.
+func TestInterruptCaptureFailureSendsNoKeys(t *testing.T) {
+	boom := errors.New("capture unavailable")
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{"capture error", boom, boom},
+		{"session gone", ErrSessionNotFound, nil},
+		{"server gone", ErrNoServer, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &captureFailingExecutor{captureErr: tc.err}
+			tm := NewTmux()
+			tm.exec = exec
+			err := (&Provider{tm: tm}).Interrupt("w")
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("Interrupt = %v, want nil for a vanished session", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Interrupt = %v, want %v", err, tc.wantErr)
+			}
+			if keys := interruptKeys(exec.calls); len(keys) != 0 {
+				t.Fatalf("sent keys without observing the pane: %q", keys)
+			}
+		})
 	}
 }
