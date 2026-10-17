@@ -433,20 +433,31 @@ giving clients real-time visibility into operation progress.
    - `request.failed` for failure (shared, `operation` enum)
 5. On success, the payload contains the full typed result.
 
-`session.message` uses the same four-minute timeout on both sides of
-the API adapter: the server emits `request.failed` with
-`error_code=timeout` at the same boundary the CLI client waits for on
-the SSE stream. If the provider path ignores cancellation and returns
-after that timeout, the API logs a late `session.message` result with
-the request ID instead of emitting a second terminal event.
+   The server never invents a terminal event at a deadline for a request
+   it did not record (rule 2). Like an unrecorded `session.submit`, an
+   unrecorded `session.message` delivery runs to its real outcome, and
+   that outcome is the request's one terminal event, however long it
+   takes. A deadline cannot tell a delivery that will never land from one
+   about to land, so a `request.failed` emitted there would be false
+   whenever the delivery later succeeded, and a client that retried on it
+   would deliver the message twice. The provider paths bound their own
+   waits. A delivery still in flight after four minutes (the CLI client's
+   wait) is logged with its request ID, and its result event follows when
+   the delivery finishes.
 
-A recorded `session.submit` (rule 2) is bounded at ten minutes, inside
-its op's `finish_by`: past that, the server closes the op failed
-`deadline_in_flight`, emits `request.failed` with `error_code=timeout`,
-and logs a late result instead of emitting a second terminal event. An
-unrecorded `session.submit` is not bounded: its terminal event comes when
-the submit returns. The CLI waits four minutes for either, as for
-`session.message`.
+   A recorded `session.message` or `session.submit` (rule 2) is bounded
+   inside its op's `finish_by`, `session.message` at four minutes and
+   `session.submit` at ten: past that, the server closes the op failed
+   `deadline_in_flight`, emits `request.failed` with
+   `error_code=timeout`, and logs a late result instead of emitting a
+   second terminal event. The CLI waits four minutes for either kind of
+   request.
+
+   A client that stops waiting has not learned the outcome. It must not
+   treat its own timeout as a failure and resend without a key. A retry
+   with the same `Idempotency-Key`, inside the key's replay window,
+   replays the original 202, so the client can resume from its
+   `event_cursor` and receive the real result.
 6. On failure, `error_code` + `error_message` describe the problem.
 7. Do NOT use the resource before the success event arrives.
 

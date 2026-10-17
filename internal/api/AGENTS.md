@@ -149,8 +149,8 @@ under it.
 
 A recorded delivery ends, through its own timeout, inside its op's
 `finish_by`, `legacyop.ExecutionBound` after its admission or adoption:
-`/messages` at `sessionMessageAsyncTimeout`, a recorded `/submit` at
-`sessionSubmitAsyncTimeout` (`TestMessageDeliveryTimeoutsEndInsideFinishBy`).
+a recorded `/messages` at `sessionMessageAsyncTimeout`, a recorded `/submit`
+at `sessionSubmitAsyncTimeout` (`TestMessageDeliveryTimeoutsEndInsideFinishBy`).
 It closes its op from its result, or `failed{deadline_in_flight}` from the
 timeout, with time left for that close to land. That time is a fixed margin,
 `ExecutionBound` less the delivery's timeout (five minutes for `/submit`,

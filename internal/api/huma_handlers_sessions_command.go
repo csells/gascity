@@ -36,7 +36,17 @@ import (
 // to isolate mutation logic from reads and streaming.
 
 var (
+	// sessionMessageAsyncTimeout bounds a recorded /messages' delivery, as
+	// sessionSubmitAsyncTimeout bounds a recorded /submit's, so the op closes
+	// inside its finish_by. An unrecorded /messages has no op to close and is
+	// not bounded: the delivery's own result is its terminal event.
 	sessionMessageAsyncTimeout = sessionMessageTimeout
+	// sessionMessageSlowDeliveryLogAfter is how long an unrecorded /messages
+	// delivery may run before the API logs that it is still in flight. It
+	// matches the CLI client's wait so the log marks the point where that
+	// client gives up. It never ends the request: the delivery's own result is
+	// the terminal event.
+	sessionMessageSlowDeliveryLogAfter = sessionMessageTimeout
 	// sessionSubmitAsyncTimeout bounds a recorded /submit's delivery. It ends
 	// well inside the op's finish_by, ExecutionBound after admission or
 	// adoption, so the op closes from the delivery's result, or from this
@@ -1043,11 +1053,28 @@ func awaitSend(d messageDelivery, operation string, timeout time.Duration, timed
 }
 
 // deliverMessage delivers an accepted /messages: it runs the send on its own
-// goroutine under sessionMessageAsyncTimeout, closes the op from the send's
-// result, or from a timeout when the send outlives it, and emits the
-// terminal event.
+// goroutine, under sessionMessageAsyncTimeout when the request is recorded,
+// closes the op from the send's result, or from a timeout when the send
+// outlives it, and emits the terminal event. An unrecorded /messages, like an
+// unrecorded /submit, has no op to close by a finish_by and is not timed out:
+// the API cannot know whether a delivery still in flight will land, so an
+// event it emitted at a deadline would be a guess, and a "failed" guess makes
+// a retry duplicate the message. Its delivery runs to its real outcome, which
+// is the request's one terminal event; the provider paths bound their own
+// waits, and a delivery still in flight after
+// sessionMessageSlowDeliveryLogAfter is logged.
 func (s *Server) deliverMessage(d messageDelivery, message string, resume bool) {
-	result := awaitSend(d, RequestOperationSessionMessage, sessionMessageAsyncTimeout, messageTimeoutError{}, func(ctx context.Context, send *messageSend) {
+	var timeout time.Duration
+	if d.adm != nil && d.adm.Recorded {
+		timeout = sessionMessageAsyncTimeout
+	} else {
+		slowAfter := sessionMessageSlowDeliveryLogAfter
+		slow := time.AfterFunc(slowAfter, func() {
+			log.Printf("api: session.message still in flight after %s request_id=%s target=%s; its result event follows when delivery finishes", slowAfter, d.reqID, d.target)
+		})
+		defer slow.Stop()
+	}
+	result := awaitSend(d, RequestOperationSessionMessage, timeout, messageTimeoutError{}, func(ctx context.Context, send *messageSend) {
 		s.sendMessage(ctx, d, send, message, resume)
 	})
 	op := s.finishMessageOp(d.adm, MessageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))

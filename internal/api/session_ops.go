@@ -82,8 +82,8 @@ import (
 // messageSentinels maps the message paths' legacy errors onto op outcomes
 // (DES-O0API §6.3), the API's and the CLI's alike (MessageOpResult). A
 // session whose row or runtime is gone is session_gone. The delivery
-// timeouts of /messages and of a recorded /submit are reported as
-// context.DeadlineExceeded.
+// timeouts of a recorded /messages and of a recorded /submit are reported
+// as context.DeadlineExceeded.
 var messageSentinels = legacyop.Sentinels{
 	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
 	ConversationClosed:  []error{session.ErrSessionClosed},
@@ -92,8 +92,8 @@ var messageSentinels = legacyop.Sentinels{
 	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
 }
 
-// messageTimeoutError is /messages' delivery timeout: the legacy event text,
-// classified as context.DeadlineExceeded for the op outcome.
+// messageTimeoutError is a recorded /messages' delivery timeout: the legacy
+// event text, classified as context.DeadlineExceeded for the op outcome.
 type messageTimeoutError struct{}
 
 // Error is the legacy timeout text.
