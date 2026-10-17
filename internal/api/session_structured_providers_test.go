@@ -894,6 +894,62 @@ func TestHandleSessionTranscriptStructuredNormalizesGeminiSystemError(t *testing
 	assertNoStructuredWireLeak(t, body)
 }
 
+// A Claude API failure is recorded as an assistant entry flagged
+// isApiErrorMessage. The structured transcript must report it as a provider
+// error, not as a reply, while an ordinary refusal stays an assistant reply.
+func TestHandleSessionTranscriptStructuredNormalizesClaudeAPIError(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl",
+		`{"uuid":"claude-api-1","parentUuid":"","type":"user","message":{"role":"user","content":"prompt"},"timestamp":"2026-06-01T00:00:00Z"}`,
+		`{"uuid":"claude-api-2","parentUuid":"claude-api-1","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Partial response"}],"stop_reason":"refusal"},"timestamp":"2026-06-01T00:00:01Z"}`,
+		`{"uuid":"claude-api-3","parentUuid":"claude-api-2","type":"assistant","isApiErrorMessage":true,"error":"invalid_request","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Request blocked by provider safeguards."}],"stop_reason":"stop_sequence"},"timestamp":"2026-06-01T00:00:02Z"}`,
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	body := w.Body.Bytes()
+	var resp sessionTranscriptGetResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	messages := structuredTranscriptMessages(resp)
+	if len(messages) != 3 {
+		t.Fatalf("StructuredMessages = %+v, want prompt, reply and provider error", messages)
+	}
+	if reply := messages[1]; reply.Role != "assistant" || reply.SystemEvent != nil {
+		t.Fatalf("ordinary refusal = role %q system_event %+v, want an assistant reply", reply.Role, reply.SystemEvent)
+	}
+	msg := messages[2]
+	want := SessionStructuredSystemEvent{Kind: "error", Category: "provider_error", Code: "invalid_request", Message: "API Error: Request blocked by provider safeguards."}
+	if msg.Role != "system" || msg.SystemEvent == nil || *msg.SystemEvent != want {
+		t.Fatalf("API error = role %q system_event %+v, want system %+v", msg.Role, msg.SystemEvent, want)
+	}
+	if len(msg.Blocks) != 1 || msg.Blocks[0].Type != "text" || msg.Blocks[0].Text != want.Message {
+		t.Fatalf("blocks = %+v, want the API error text %q", msg.Blocks, want.Message)
+	}
+	assertNoStructuredWireLeak(t, body)
+}
+
 func TestHandleSessionTranscriptStructuredNormalizesClaudeTaskOutput(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
