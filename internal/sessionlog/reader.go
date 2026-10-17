@@ -1681,12 +1681,17 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		// Current Claude Code names the directory with claudeCodeProjectSlug.
+		// Keep the legacy spelling as a candidate so transcripts written by
+		// earlier versions, which kept "_" and other characters, still
+		// resolve.
+		for _, slug := range []string{claudeCodeProjectSlug(path), ProjectSlug(path)} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }
@@ -1725,4 +1730,26 @@ func ProjectSlug(absPath string) string {
 	s := strings.ReplaceAll(absPath, "/", "-")
 	s = strings.ReplaceAll(s, ".", "-")
 	return s
+}
+
+// claudeCodeProjectSlug converts an absolute path to the project directory
+// name current Claude Code writes: every character other than an ASCII letter
+// or digit becomes "-", so "_" does too. Claude Code applies its JavaScript
+// replace(/[^a-zA-Z0-9]/g, "-") per UTF-16 code unit, so a rune outside the
+// Basic Multilingual Plane becomes two dashes. Claude Code shortens names
+// longer than 200 characters with a hash suffix; those are not reproduced.
+func claudeCodeProjectSlug(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }

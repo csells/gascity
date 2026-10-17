@@ -286,7 +286,15 @@ func InferActivityFromEntries(entries []*Entry) string {
 // isInterruptMessage checks if a user message is an interrupt marker.
 // Claude Code writes these when the user presses Escape/Ctrl-C mid-turn.
 // The session is idle afterwards (waiting at the prompt), not starting a new turn.
+//
+// A user entry holding nothing but a marker ("[Request interrupted by user
+// for tool use]" included) is one, by the same test the turn scan uses to end
+// a turn. The plain "[Request interrupted by user]" form also matches anywhere
+// in the text, as it always has.
 func isInterruptMessage(message json.RawMessage) bool {
+	if claudeInterruptEntry(message) {
+		return true
+	}
 	raw := unwrapJSONString(message)
 	// Try object form: {"content": [{"text": "..."}]} or {"content": "..."}
 	var msg struct {

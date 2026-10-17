@@ -58,7 +58,8 @@ import (
 // claudeInterruptMarker starts the text Claude Code writes as the whole of a
 // user entry when the user interrupts a turn ("[Request interrupted by
 // user]", "[Request interrupted by user for tool use]"). The activity scan's
-// isInterruptMessage (tail.go) matches the first form anywhere in the text.
+// isInterruptMessage (tail.go) accepts every entry claudeInterruptEntry does,
+// and also matches the first form anywhere in the text.
 const claudeInterruptMarker = "[Request interrupted by user"
 
 // claudeToolResultType names a tool result content block. A message without

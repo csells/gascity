@@ -1054,6 +1054,60 @@ func TestFindSessionFile(t *testing.T) {
 	}
 }
 
+// Current Claude Code names a project directory by replacing every character
+// other than an ASCII letter or digit with "-", so .../workspace_with_underscores
+// lives under ...-workspace-with-underscores. Directories written by earlier
+// Claude versions kept those characters and must still resolve.
+func TestFindSessionFileClaudeNormalizedWorkDir(t *testing.T) {
+	key := "11111111-2222-4333-8444-555555555555"
+	for _, tt := range []struct {
+		name, dir, normalized string
+	}{
+		{"underscores", "workspace_with_underscores", "workspace-with-underscores"},
+		{"punctuation", "my work+space@v2", "my-work-space-v2"},
+	} {
+		parent := t.TempDir()
+		workDir := filepath.Join(parent, tt.dir)
+		legacy := ProjectSlug(workDir)
+		normalized := ProjectSlug(parent) + "-" + tt.normalized
+		for layout, slug := range map[string]string{"current": normalized, "legacy": legacy} {
+			t.Run(tt.name+"/"+layout, func(t *testing.T) {
+				base := t.TempDir()
+				dir := filepath.Join(base, slug)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				keyed := filepath.Join(dir, key+".jsonl")
+				if err := os.WriteFile(keyed, []byte(`{}`+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if got := FindSessionFileByID([]string{base}, workDir, key); got != keyed {
+					t.Errorf("FindSessionFileByID() = %q, want %q", got, keyed)
+				}
+				if got := FindSessionFileByID([]string{base}, workDir, "another-session"); got != "" {
+					t.Errorf("FindSessionFileByID(unrelated key) = %q, want empty", got)
+				}
+				if got := FindSessionFile([]string{base}, workDir); got != keyed {
+					t.Errorf("FindSessionFile() = %q, want %q", got, keyed)
+				}
+			})
+		}
+	}
+}
+
+func TestClaudeCodeProjectSlug(t *testing.T) {
+	for in, want := range map[string]string{
+		"/home/user/my_project": "-home-user-my-project",
+		"/a/b.c d+e@f~g":        "-a-b-c-d-e-f-g",
+		"/x/caf\u00e9":          "-x-caf-",
+		"/x/\U0001F600":         "-x---",
+	} {
+		if got := claudeCodeProjectSlug(in); got != want {
+			t.Errorf("claudeCodeProjectSlug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFindSessionFileNotFound(t *testing.T) {
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/path")
 	if got != "" {

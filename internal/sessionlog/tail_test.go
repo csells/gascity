@@ -423,6 +423,54 @@ func TestInferActivity(t *testing.T) {
 			message: `{"role":"user","content":[{"type":"text","text":"Please fix the bug"}]}`,
 			wantAct: "in-turn",
 		},
+		{
+			name:    "user tool-use interrupt array content → idle",
+			typ:     "user",
+			message: `{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}`,
+			wantAct: "idle",
+		},
+		{
+			name:    "user tool-use interrupt string content → idle",
+			typ:     "user",
+			message: `{"role":"user","content":"[Request interrupted by user for tool use]"}`,
+			wantAct: "idle",
+		},
+		{
+			name:    "user tool-use interrupt padded string content → idle",
+			typ:     "user",
+			message: `{"role":"user","content":"  [Request interrupted by user for tool use]\n"}`,
+			wantAct: "idle",
+		},
+		{
+			name:    "user tool-use interrupt string-wrapped → idle",
+			typ:     "user",
+			message: `"{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user for tool use]\"}]}"`,
+			wantAct: "idle",
+		},
+		{
+			name:    "user prose quoting tool-use interrupt → in-turn",
+			typ:     "user",
+			message: `{"role":"user","content":"Explain [Request interrupted by user for tool use]"}`,
+			wantAct: "in-turn",
+		},
+		{
+			name:    "user tool-use interrupt followed by prose → in-turn",
+			typ:     "user",
+			message: `{"role":"user","content":"[Request interrupted by user for tool use] and continue"}`,
+			wantAct: "in-turn",
+		},
+		{
+			name:    "user unbracketed tool-use interrupt → in-turn",
+			typ:     "user",
+			message: `{"role":"user","content":"Request interrupted by user for tool use"}`,
+			wantAct: "in-turn",
+		},
+		{
+			name:    "user tool result carrying tool-use interrupt → in-turn",
+			typ:     "user",
+			message: `{"role":"user","content":[{"tool_use_id":"toolu_01","type":"tool_result","content":"[Request interrupted by user for tool use]","is_error":true}]}`,
+			wantAct: "in-turn",
+		},
 	}
 
 	for _, tt := range tests {
@@ -491,6 +539,27 @@ func TestExtractTailMetaActivity(t *testing.T) {
 					"usage": map[string]any{"input_tokens": 1000},
 				}},
 				{"type": "system", "subtype": "turn_duration"},
+			},
+			wantAct: "idle",
+		},
+		{
+			// Claude Code's native shape when the user interrupts a running
+			// tool: an error tool_result, then a standalone text entry.
+			name: "ends with tool-use interrupt → idle",
+			lines: []map[string]any{
+				{"type": "assistant", "message": map[string]any{
+					"role": "assistant", "model": "claude-opus-4-5-20251101",
+					"stop_reason": "tool_use",
+					"content":     []map[string]any{{"type": "tool_use", "id": "toolu_01"}},
+					"usage":       map[string]any{"input_tokens": 1000},
+				}},
+				{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]any{{
+					"tool_use_id": "toolu_01", "type": "tool_result",
+					"content": "[Request interrupted by user for tool use]", "is_error": true,
+				}}}},
+				{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]any{{
+					"type": "text", "text": "[Request interrupted by user for tool use]",
+				}}}},
 			},
 			wantAct: "idle",
 		},

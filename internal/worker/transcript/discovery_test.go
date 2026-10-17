@@ -607,6 +607,34 @@ func TestSupportsIDLookup(t *testing.T) {
 	}
 }
 
+func TestHasKeyedTranscriptClaudeUnderscoreWorkDir(t *testing.T) {
+	base := t.TempDir()
+	parent := t.TempDir()
+	workDir := filepath.Join(parent, "workspace_with_underscores")
+	slugDir := filepath.Join(base, sessionlog.ProjectSlug(parent)+"-workspace-with-underscores")
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := "11111111-2222-4333-8444-555555555555"
+	keyed := filepath.Join(slugDir, key+".jsonl")
+	if err := os.WriteFile(keyed, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"claude/tmux-cli", "claude-moonshot"} {
+		exists, probeable := HasKeyedTranscript([]string{base}, provider, workDir, key)
+		if !exists || !probeable {
+			t.Errorf("HasKeyedTranscript(%q, present) = (exists=%v, probeable=%v), want (true, true)", provider, exists, probeable)
+		}
+		exists, probeable = HasKeyedTranscript([]string{base}, provider, workDir, "gc-missing")
+		if exists || !probeable {
+			t.Errorf("HasKeyedTranscript(%q, missing) = (exists=%v, probeable=%v), want (false, true)", provider, exists, probeable)
+		}
+	}
+	if got := DiscoverPath([]string{base}, "claude/tmux-cli", workDir, key); got != keyed {
+		t.Errorf("DiscoverPath() = %q, want %q", got, keyed)
+	}
+}
+
 func TestHasKeyedTranscript(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")
