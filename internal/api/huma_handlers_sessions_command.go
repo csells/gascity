@@ -178,16 +178,12 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionCreate)
+	if acceptErr != nil {
+		return nil, acceptErr
 	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
-	}
-
 	go func() {
+		defer finishRequest()
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		if transport == "acp" {
 			var mcpMetaErr error
@@ -372,15 +368,12 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		}
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
-	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionCreate)
+	if acceptErr != nil {
+		return nil, acceptErr
 	}
 	go func() {
+		defer finishRequest()
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
@@ -863,8 +856,10 @@ type messageDelivery struct {
 
 // acceptMessageOp is the acceptance /submit and /messages share: it
 // validates req's target, admits req as a message op under the ops.content
-// gate (session_ops.go), starts deliver on its own goroutine and returns the
-// 202 body. A replay is answered with its body and starts nothing.
+// gate (session_ops.go), records the request's acceptance so its request_id
+// resolves through GET /request/{requestId} (request_outcome.go), starts
+// deliver on its own goroutine and returns the 202 body. A replay is answered
+// with its body and starts nothing: its request_id is the one first accepted.
 func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, deliver func(messageDelivery)) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -875,6 +870,12 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 		return asyncAcceptedBody{}, err
 	}
 	req.conv = conv
+	// The acceptance is recorded in the city event log: a city without one
+	// refuses the request before it is admitted.
+	ep, err := s.asyncRequestEventLog()
+	if err != nil {
+		return asyncAcceptedBody{}, err
+	}
 	// The cursor is captured before admission and before the goroutine: a
 	// fast terminal event, or a replay's re-emitted one, lands after it.
 	eventCursor, err := s.currentCityEventCursor()
@@ -894,6 +895,13 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	if err != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
 	}
+	finish, err := s.recordAsyncAcceptance(ep, reqID, req.operation)
+	if err != nil {
+		// Nothing ran: release the admission, leaving a recorded op open as
+		// releaseOnPanic does, so a same-key retry adopts it.
+		adm.Finish(legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonOther}, LeaveOpen: true})
+		return asyncAcceptedBody{}, err
+	}
 	body := acceptedMessageBody(adm, reqID, eventCursor)
 	adm.Accept(inflightAnswer{operation: req.operation, body: body})
 	s.ops.runAfterAdmit()
@@ -907,6 +915,7 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	operation := req.operation
 	handedOff = true
 	go func() {
+		defer finish()
 		defer s.recoverMessageOp(adm, reqID, operation)
 		deliver(d)
 	}()
