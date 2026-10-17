@@ -407,6 +407,20 @@ func (sm *SupervisorMux) registerCityRoutes() {
 			"For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. "+
 			"An interrupt_now submit interrupts the turn the same way but leaves background terminals running. "+
 			"A runtime that can interrupt the turn neither by keys nor by protocol gets nothing sent and answers 501 turn_interrupt_unsupported."))
+	cityRegister(sm, huma.Operation{
+		OperationID: "get-request-outcome",
+		Method:      http.MethodGet,
+		Path:        "/request/{requestId}",
+		Summary:     "Get the outcome of an async session request",
+		Description: "Reads the outcome of a session create, message or submit request by the request_id its 202 returned, " +
+			"so a client that missed the request.result.* or request.failed event (a dropped stream, a supervisor restart) can still learn it. " +
+			"The outcome is derived from the persisted city event log: it survives a supervisor restart and lasts as long as the log retains the request's events. " +
+			"pending means the request is still running; succeeded and failed carry the terminal event exactly as the event stream delivered it; " +
+			"outcome_unknown means the server that accepted the request stopped before recording an outcome, so the operation may or may not have taken effect. " +
+			"An id that was never accepted by this city, or whose events have aged out of the log, is a 404 request-not-found.",
+		Errors: []int{http.StatusNotFound, http.StatusServiceUnavailable},
+	}, (*Server).humaHandleRequestOutcome)
+	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. "+

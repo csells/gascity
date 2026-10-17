@@ -161,16 +161,12 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionCreate)
+	if acceptErr != nil {
+		return nil, acceptErr
 	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
-	}
-
 	go func() {
+		defer finishRequest()
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		if transport == "acp" {
 			var mcpMetaErr error
@@ -355,15 +351,12 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		}
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
-	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionCreate)
+	if acceptErr != nil {
+		return nil, acceptErr
 	}
 	go func() {
+		defer finishRequest()
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
@@ -787,17 +780,14 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		intent = session.SubmitIntentDefault
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
-	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionSubmit)
+	if acceptErr != nil {
+		return asyncAcceptedBody{}, acceptErr
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
 	go func() {
+		defer finishRequest()
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
 		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store.Store, sessionTarget)
 		if err != nil {
@@ -853,13 +843,9 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 		return asyncAcceptedBody{}, err
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
-	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionMessage)
+	if acceptErr != nil {
+		return asyncAcceptedBody{}, acceptErr
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
@@ -870,6 +856,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 	// guess, and a "failed" guess makes a retry duplicate the message. The
 	// provider paths bound their own waits.
 	go func() {
+		defer finishRequest()
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
 		slowAfter := sessionMessageSlowDeliveryLogAfter
 		slow := time.AfterFunc(slowAfter, func() {
