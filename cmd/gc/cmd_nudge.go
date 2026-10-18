@@ -781,6 +781,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// A deferred user submit is the user's prompt, which hook output cannot
+	// deliver: it would reach the agent as context. Leave it for the poller,
+	// which types it (tryDeliverQueuedNudgesByPoller).
+	var submits []queuedNudge
+	items, submits = splitQueuedUserSubmits(items)
+	if len(submits) > 0 {
+		if err := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(submits)); err != nil {
+			fmt.Fprintf(stderr, "gc nudge drain: leaving deferred submits for the poller: %v; their lease expiry returns them\n", err) //nolint:errcheck
+		}
+	}
 	if len(items) == 0 {
 		if inject {
 			return 0
@@ -2053,10 +2063,23 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if len(items) == 0 {
 		return false, bookkeepErr
 	}
+	// One delivery per pass: a deferred user submit alone, or the reminders
+	// queued ahead of the next one. The rest waits for a later pass.
+	items, later := nextQueuedDeliveryGroup(items)
+	if len(later) > 0 {
+		if err := deferQueuedNudgesToLaterPass(target.cityPath, later); err != nil {
+			relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+			return false, errors.Join(bookkeepErr, err, relErr)
+		}
+	}
 	var msg string
-	if target.sessionTransport() == "acp" {
+	switch {
+	case isQueuedUserSubmit(items[0]):
+		// The user's prompt, as the user wrote it: never a reminder.
+		msg = items[0].Message
+	case target.sessionTransport() == "acp":
 		msg = formatNudgeRuntimeMessage(items)
-	} else {
+	default:
 		msg = formatNudgeInjectOutput(items)
 	}
 	handle, err := workerHandleForNudgeTarget(target, handleSessStore, sp)
@@ -2074,6 +2097,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
 		if retryAt, released := queuedNudgeReleaseAfter(err, time.Now()); released {
+			if errors.Is(err, runtime.ErrSessionBusy) && nudgeWarningWriter != nil {
+				// Charged no attempt, so nothing else records that this
+				// delivery keeps waiting on a turn the runtime will not interrupt.
+				fmt.Fprintf(nudgeWarningWriter, "gc nudge: %s: %d queued item(s) %s deferred, retry at %s: %v\n", //nolint:errcheck // best-effort warning
+					target.agentKey(), len(items), strings.Join(queuedNudgeIDs(items), ","), retryAt.UTC().Format(time.RFC3339), err)
+			}
 			if recErr := releaseQueuedNudgeClaimsUntil(target.cityPath, queuedNudgeIDs(items), retryAt); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}
@@ -2497,6 +2526,53 @@ func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	disableProductMetricsForChild(cmd)
 	return cmd
+}
+
+// isQueuedUserSubmit reports whether item is a user's submit the session
+// layer queued (nudgequeue.SourceSubmit), not a nudge.
+func isQueuedUserSubmit(item queuedNudge) bool {
+	return item.Source == nudgequeue.SourceSubmit
+}
+
+// splitQueuedUserSubmits separates the deferred user submits in items from
+// the nudges, keeping each side's order.
+func splitQueuedUserSubmits(items []queuedNudge) (nudges, submits []queuedNudge) {
+	for _, item := range items {
+		if isQueuedUserSubmit(item) {
+			submits = append(submits, item)
+		} else {
+			nudges = append(nudges, item)
+		}
+	}
+	return nudges, submits
+}
+
+// nextQueuedDeliveryGroup splits a claimed batch, in queue order, into what
+// one delivery carries and what waits. A deferred user submit goes out alone,
+// as the user's prompt; nudges go out together, up to the next submit, as one
+// reminder. Nothing queued after a submit is delivered ahead of it.
+func nextQueuedDeliveryGroup(items []queuedNudge) (group, later []queuedNudge) {
+	if len(items) == 0 || isQueuedUserSubmit(items[0]) {
+		return items[:min(len(items), 1)], items[min(len(items), 1):]
+	}
+	n := 1
+	for n < len(items) && !isQueuedUserSubmit(items[n]) {
+		n++
+	}
+	return items[:n], items[n:]
+}
+
+// deferQueuedNudgesToLaterPass returns claimed items this pass does not
+// deliver to pending, first moving them onto a new delivery key: the key they
+// were claimed under belongs to this pass's delivery, and a runtime that
+// deduplicates by key would answer them with its receipt (see
+// rekeyQueuedNudgesAfterFailedBookkeeping).
+func deferQueuedNudgesToLaterPass(cityPath string, items []queuedNudge) error {
+	ids := queuedNudgeIDs(items)
+	if err := openNudgeQueue(cityPath, beads.NudgesStore{}).Repin.RepinClaims(ids, newQueuedNudgeBatchID()); err != nil {
+		return errors.Join(fmt.Errorf("moving queued items to a later delivery: %w", err), releaseQueuedNudgeClaims(cityPath, ids))
+	}
+	return releaseQueuedNudgeClaims(cityPath, ids)
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {
