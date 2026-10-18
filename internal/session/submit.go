@@ -139,7 +139,7 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 		}
 		if m.queueFor(b.Metadata, sessName, by) {
 			outcome.Queued, outcome.Deferred = true, true
-			return m.enqueueDeferredSubmitLocked(b, sessName, message)
+			return m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
 		}
 		switch intent {
 		case SubmitIntentFollowUp:
@@ -147,14 +147,14 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-				outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+				outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
 				outcome.Deferred = outcome.Queued
 				return err
 			}
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
 			}
-			if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+			if err := m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit); err != nil {
 				return err
 			}
 			outcome.Queued = true
@@ -187,21 +187,21 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 				// against a conversation the operator has already discarded.
 				// Queue it for the incarnation the controller is about to bring
 				// up instead.
-				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+				if err := m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit); err != nil {
 					return err
 				}
 				outcome.Queued = true
 				return nil
 			}
 			if (State(b.Metadata["state"]) == StateStartPending || State(b.Metadata["state"]) == StateCreating) && !running {
-				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+				if err := m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit); err != nil {
 					return err
 				}
 				outcome.Queued = true
 				return nil
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
-			outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming), nudgequeue.SourceSubmit)
 			outcome.Deferred = outcome.Queued
 			return err
 		}
@@ -236,7 +236,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	}
 	running := State(b.Metadata["state"]) != StateSuspended && m.liveAgent(sessName, hints.ProcessNames)
 	if !running {
-		return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+		return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
 	}
 	mode := runtime.TurnInterruptModeFor(m.sp, sessName)
 	// A protocol runtime cancels the turn itself; its Stop may leave the
@@ -310,7 +310,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 			return false, err
 		}
 	}
-	return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+	return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
 }
 
 // restartAndSendLocked replaces the runtime the interrupt just stopped. The
@@ -757,7 +757,16 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
-func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
+// deferredNudgeSource is the Source of a nudge sent through Send that the
+// session queued: it is delivered later as a deferred reminder. A user's
+// submit is queued as nudgequeue.SourceSubmit instead, and delivered as the
+// user's prompt.
+const deferredNudgeSource = "session"
+
+// enqueueDeferredSubmitLocked queues message for sessName's next delivery
+// boundary under source (nudgequeue.SourceSubmit for a user's submit,
+// deferredNudgeSource for a nudge).
+func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, source string) error {
 	queue := m.deferredQueue()
 	if queue == nil {
 		return errors.New("deferred submit is unavailable without a city path")
@@ -768,7 +777,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
 		ContinuationEpoch: deferredSubmitEpoch(b),
-		Source:            "session",
+		Source:            source,
 		Message:           message,
 		CreatedAt:         now,
 		DeliverAfter:      now,
@@ -778,7 +787,12 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {
-		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
+		// The item is queued either way: the supervisor's dispatcher also
+		// delivers it. A poller that did not start only loses the fast path,
+		// so say so instead of dropping the error.
+		if err := startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName); err != nil {
+			log.Printf("session: %q: queued a deferred submit but could not start its poller: %v", sessName, err)
+		}
 	}
 	return nil
 }

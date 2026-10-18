@@ -1292,12 +1292,12 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 // up, gets the message queued (reports true). So does a live session the
 // runtime would not type into because it is running a turn the submit keys
 // would interrupt (runtime.ErrSessionBusy): the queue delivers it later.
-func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
+func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool, queueSource string) (bool, error) {
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); err != nil {
 		if !errors.Is(err, ErrResumeHeld) && !errors.Is(err, ErrAgentDead) {
 			return false, err
 		}
-		return true, m.enqueueDeferredSubmitLocked(b, sessName, message)
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 	}
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
@@ -1308,7 +1308,7 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	}
 	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 		if errors.Is(err, runtime.ErrSessionBusy) {
-			return true, m.enqueueDeferredSubmitLocked(b, sessName, message)
+			return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 		}
 		return false, err
 	}
@@ -1328,7 +1328,7 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 		if err != nil {
 			return err
 		}
-		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate)
+		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate, deferredNudgeSource)
 		outcome.Deferred = outcome.Queued
 		return err
 	})
