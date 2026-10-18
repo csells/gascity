@@ -78,6 +78,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	var messages []*Entry
 	var lastUUID string
 	toolContexts := make(map[string]codexToolCallContext)
+	var openCalls codexOpenToolCalls
 	responseItemIDs := newStableSyntheticEntryIDSequence("codex")
 	eventMsgIDs := newStableSyntheticEntryIDSequence("codex-event")
 
@@ -86,7 +87,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 
 		switch e.raw.Type {
 		case "response_item":
-			entry := convertResponseItem(e.raw.Payload, e.line, ts, patchApplyResults, toolContexts, responseItemIDs.ForRecord([]byte(e.line)))
+			entry := convertResponseItem(e.raw.Payload, e.line, ts, patchApplyResults, toolContexts, &openCalls, responseItemIDs.ForRecord([]byte(e.line)))
 			if entry != nil {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -100,6 +101,14 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 			}
 			eventID := eventMsgIDs.ForRecord([]byte(e.line))
 			switch em.Type {
+			case "task_started":
+				openCalls.startTurn(em.TurnID)
+				continue
+
+			case "task_complete":
+				openCalls.endTurn(em.TurnID)
+				continue
+
 			case "user_message":
 				if hasResponseItemUser {
 					continue // prefer response_item user messages
@@ -151,6 +160,9 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				messages = append(messages, entry)
 
 			case "error", "stream_error", "turn_aborted":
+				if em.Type == "turn_aborted" {
+					openCalls.endTurn(em.TurnID)
+				}
 				systemEvent := codexSystemEvent(em)
 				entry := &Entry{
 					UUID:        eventID.ID("event_msg:" + em.Type),
@@ -175,14 +187,63 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}
 
 	return &Session{
-		ID:            codexSessionID(path),
-		Messages:      messages,
-		Diagnostics:   diagnostics,
-		DetachedUsage: codexHistoryUsage(entries),
+		ID:                 codexSessionID(path),
+		Messages:           messages,
+		OrphanedToolUseIDs: openCalls.unanswered(),
+		Diagnostics:        diagnostics,
+		DetachedUsage:      codexHistoryUsage(entries),
 	}, nil
 }
 
-func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext, syntheticID stableSyntheticEntryIDSource) *Entry {
+// codexOpenToolCalls tracks the tool calls of the current turn that have no
+// output yet. Only the current turn counts: Codex writes an output for every
+// call it finishes or aborts, so a call left unanswered by an earlier turn is
+// not running, and clients read a nonempty list on an idle session as a stuck
+// call. Turns follow the same rules as the lifecycle activity scan
+// (extractCodexLifecycleActivity): task_started opens a turn, and
+// task_complete or turn_aborted ends it when it names that turn or no turn.
+type codexOpenToolCalls struct {
+	turnID string
+	inTurn bool
+	calls  map[string]bool
+}
+
+func (o *codexOpenToolCalls) startTurn(turnID string) {
+	o.turnID = turnID
+	o.inTurn = true
+	o.calls = nil
+}
+
+func (o *codexOpenToolCalls) endTurn(turnID string) {
+	if turnID != "" && o.turnID != "" && turnID != o.turnID {
+		return // a late completion of an earlier turn
+	}
+	o.inTurn = false
+	o.calls = nil
+}
+
+func (o *codexOpenToolCalls) open(callID string) {
+	if !o.inTurn || callID == "" {
+		return
+	}
+	if o.calls == nil {
+		o.calls = make(map[string]bool)
+	}
+	o.calls[callID] = true
+}
+
+func (o *codexOpenToolCalls) answer(callID string) {
+	delete(o.calls, callID)
+}
+
+func (o *codexOpenToolCalls) unanswered() map[string]bool {
+	if len(o.calls) == 0 {
+		return nil
+	}
+	return o.calls
+}
+
+func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext, openCalls *codexOpenToolCalls, syntheticID stableSyntheticEntryIDSource) *Entry {
 	var ri codexResponseItem
 	if json.Unmarshal(payload, &ri) != nil {
 		return nil
@@ -237,6 +298,7 @@ func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, 
 		if callID != "" {
 			toolContexts[callID] = codexToolCallContextFromInput(ri.Name, input)
 		}
+		openCalls.open(callID)
 		return &Entry{
 			UUID:      uuid,
 			Type:      "assistant",
@@ -278,6 +340,7 @@ func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, 
 	case "function_call_output", "custom_tool_call_output":
 		callID := firstNonEmpty(ri.CallID, ri.ID)
 		context := toolContexts[callID]
+		openCalls.answer(callID)
 		content := codexToolResultContent(ri.Output, patchApplyResults[callID], context)
 		return &Entry{
 			UUID:      uuid,
@@ -1605,6 +1668,7 @@ type codexEventMsg struct {
 	Text           string                      `json:"text"`             // for agent_reasoning
 	CodexErrorInfo string                      `json:"codex_error_info"` // for usage_limit_exceeded and related errors
 	CallID         string                      `json:"call_id,omitempty"`
+	TurnID         string                      `json:"turn_id,omitempty"`
 	Stdout         string                      `json:"stdout,omitempty"`
 	Stderr         string                      `json:"stderr,omitempty"`
 	Changes        map[string]codexPatchChange `json:"changes,omitempty"`

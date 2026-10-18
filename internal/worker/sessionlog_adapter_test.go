@@ -792,6 +792,54 @@ func TestSessionLogAdapterLoadHistoryClassifiesCodexDeniedToolCall(t *testing.T)
 	}
 }
 
+// While a Codex tool call runs, tail_state must report the turn in_turn with
+// that call open, as every other structured provider does for an unanswered
+// tool_use.
+func TestSessionLogAdapterLoadHistoryReportsOpenCodexToolCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, call string
+	}{
+		{"custom_tool_call exec", `{"type":"custom_tool_call","status":"completed","call_id":"call_open","name":"exec","input":"text(await tools.exec_command({cmd:\"sleep 30\"}));\n"}`},
+		{"function_call exec_command", `{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 30\",\"yield_time_ms\":10000}","call_id":"call_open"}`},
+		{"function_call shell", `{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"sleep 30\"]}","call_id":"call_open"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeLines(t, path,
+				`{"timestamp":"2026-10-17T15:39:00.277Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","started_at":1792251540,"model_context_window":258400}}`,
+				`{"timestamp":"2026-10-17T15:39:00.334Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run sleep 30"}]}}`,
+				`{"timestamp":"2026-10-17T15:39:01.000Z","type":"response_item","payload":`+tc.call+`}`,
+			)
+
+			snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{Provider: "codex", TranscriptPath: path, GCSessionID: "gc-open"})
+			if err != nil {
+				t.Fatalf("LoadHistory() error = %v", err)
+			}
+			if snapshot.TailState.Activity != TailActivityInTurn {
+				t.Errorf("Activity = %q, want in_turn", snapshot.TailState.Activity)
+			}
+			if got := snapshot.TailState.OpenToolUseIDs; len(got) != 1 || got[0] != "call_open" {
+				t.Errorf("OpenToolUseIDs = %v, want [call_open]", got)
+			}
+
+			// Once the turn ends, the call is no longer open even though no
+			// output was recorded for it.
+			appendTranscript(t, path, `{"timestamp":"2026-10-17T15:39:08.220Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}`+"\n")
+			snapshot, err = (SessionLogAdapter{}).LoadHistory(LoadRequest{Provider: "codex", TranscriptPath: path, GCSessionID: "gc-open"})
+			if err != nil {
+				t.Fatalf("LoadHistory() after abort error = %v", err)
+			}
+			if snapshot.TailState.Activity != TailActivityIdle {
+				t.Errorf("Activity after abort = %q, want idle", snapshot.TailState.Activity)
+			}
+			if got := snapshot.TailState.OpenToolUseIDs; len(got) != 0 {
+				t.Errorf("OpenToolUseIDs after abort = %v, want none", got)
+			}
+		})
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCarriesCodexTokenUsage(t *testing.T) {
 	t.Parallel()
 

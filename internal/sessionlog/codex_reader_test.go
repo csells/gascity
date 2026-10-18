@@ -2,8 +2,10 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -666,6 +668,60 @@ func TestReadCodexFileMarksUserDeniedToolResult(t *testing.T) {
 			}
 			if block := codexReaderToolResultBlock(t, sess, "call-denied"); block.IsError != tc.wantError {
 				t.Fatalf("IsError = %v, want %v; content = %s", block.IsError, tc.wantError, block.Content)
+			}
+		})
+	}
+}
+
+func TestReadCodexFileReportsOpenToolCallsForCurrentTurn(t *testing.T) {
+	start := func(turn string) string {
+		return `{"timestamp":"2026-06-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"` + turn + `"}}`
+	}
+	end := func(kind, turn string) string {
+		return `{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"` + kind + `","turn_id":"` + turn + `"}}`
+	}
+	customCall := func(id string) string {
+		return `{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"` + id + `","name":"exec","input":"text(await tools.exec_command({cmd:\"sleep 30\"}));\n"}}`
+	}
+	execCall := func(id string) string {
+		return `{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 30\"}","call_id":"` + id + `"}}`
+	}
+	shellCall := func(id string) string {
+		return `{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"sleep 30\"]}","call_id":"` + id + `"}}`
+	}
+	output := func(kind, id string) string {
+		return `{"timestamp":"2026-06-01T00:00:02Z","type":"response_item","payload":{"type":"` + kind + `","call_id":"` + id + `","output":"done"}}`
+	}
+	webSearch := `{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"gas city"}}}`
+
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  []string
+	}{
+		{"running custom call", []string{start("t1"), customCall("call-a")}, []string{"call-a"}},
+		{"running exec_command", []string{start("t1"), execCall("call-a")}, []string{"call-a"}},
+		{"running shell", []string{start("t1"), shellCall("call-a")}, []string{"call-a"}},
+		{"parallel calls, one answered", []string{start("t1"), execCall("call-a"), execCall("call-b"), output("function_call_output", "call-a")}, []string{"call-b"}},
+		{"answered custom call", []string{start("t1"), customCall("call-a"), output("custom_tool_call_output", "call-a")}, nil},
+		{"completed turn", []string{start("t1"), execCall("call-a"), end("task_complete", "t1")}, nil},
+		{"aborted turn", []string{start("t1"), customCall("call-a"), end("turn_aborted", "t1")}, nil},
+		{"terminal without turn id", []string{start("t1"), customCall("call-a"), end("turn_aborted", "")}, nil},
+		{"earlier turn's unanswered call", []string{start("t1"), execCall("call-old"), start("t2"), execCall("call-new")}, []string{"call-new"}},
+		{"late completion of an earlier turn", []string{start("t1"), start("t2"), execCall("call-new"), end("task_complete", "t1")}, []string{"call-new"}},
+		{"hosted web search", []string{start("t1"), webSearch}, nil},
+		{"no turn start", []string{execCall("call-a")}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+
+			sess, err := ReadCodexFile(path, 0)
+			if err != nil {
+				t.Fatalf("ReadCodexFile: %v", err)
+			}
+			if got := slices.Sorted(maps.Keys(sess.OrphanedToolUseIDs)); !slices.Equal(got, tc.want) {
+				t.Fatalf("OrphanedToolUseIDs = %v, want %v", got, tc.want)
 			}
 		})
 	}
