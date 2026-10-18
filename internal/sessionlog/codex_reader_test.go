@@ -727,6 +727,67 @@ func TestReadCodexFileReportsOpenToolCallsForCurrentTurn(t *testing.T) {
 	}
 }
 
+func TestReadCodexFileConvertsLocalShellCall(t *testing.T) {
+	// Codex persists a local_shell_call item and answers it with a
+	// function_call_output carrying the same call_id.
+	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		`{"timestamp":"2026-06-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
+		`{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call-ls","status":"completed","action":{"type":"exec","command":["bash","-lc","ls"],"timeout_ms":10000,"working_directory":"/repo","env":null,"user":null}}}`,
+	})
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCodexFile: %v", err)
+	}
+	if !sess.OrphanedToolUseIDs["call-ls"] {
+		t.Fatalf("OrphanedToolUseIDs = %v, want call-ls open while it runs", sess.OrphanedToolUseIDs)
+	}
+	var use *ContentBlock
+	for _, entry := range sess.Messages {
+		for _, block := range entry.ContentBlocks() {
+			if block.Type == "tool_use" && block.ID == "call-ls" {
+				use = &block
+			}
+		}
+	}
+	if use == nil {
+		t.Fatalf("missing tool_use call-ls in %+v", sess.Messages)
+	}
+	if use.Name != "local_shell" {
+		t.Fatalf("tool_use name = %q, want local_shell", use.Name)
+	}
+	input := codexReaderToolInput(t, sess, "call-ls")
+	if got := codexReaderStringSlice(t, input["command"]); !slices.Equal(got, []string{"bash", "-lc", "ls"}) {
+		t.Fatalf("command = %v, want [bash -lc ls]; input = %s", got, mustMarshal(input))
+	}
+	if got := jsonStringValue(input["workdir"]); got != "/repo" {
+		t.Fatalf("workdir = %q, want /repo; input = %s", got, mustMarshal(input))
+	}
+	if got, ok := jsonIntValue(input["timeout_ms"]); !ok || got != 10000 {
+		t.Fatalf("timeout_ms = %d/%v, want 10000; input = %s", got, ok, mustMarshal(input))
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := f.WriteString(`{"timestamp":"2026-06-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-ls","output":"README.md\n"}}` + "\n"); err != nil {
+		t.Fatalf("append output: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	sess, err = ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCodexFile after output: %v", err)
+	}
+	if len(sess.OrphanedToolUseIDs) != 0 {
+		t.Fatalf("OrphanedToolUseIDs = %v, want none once answered", sess.OrphanedToolUseIDs)
+	}
+	codexReaderToolResultBlock(t, sess, "call-ls")
+}
+
 func TestReadCodexFileNormalizesJSONStringCommandResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
 	writeCodexReaderFixture(t, path,

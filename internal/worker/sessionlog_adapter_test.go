@@ -802,6 +802,7 @@ func TestSessionLogAdapterLoadHistoryReportsOpenCodexToolCall(t *testing.T) {
 		{"custom_tool_call exec", `{"type":"custom_tool_call","status":"completed","call_id":"call_open","name":"exec","input":"text(await tools.exec_command({cmd:\"sleep 30\"}));\n"}`},
 		{"function_call exec_command", `{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 30\",\"yield_time_ms\":10000}","call_id":"call_open"}`},
 		{"function_call shell", `{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"sleep 30\"]}","call_id":"call_open"}`},
+		{"local_shell_call", `{"type":"local_shell_call","call_id":"call_open","status":"in_progress","action":{"type":"exec","command":["bash","-lc","sleep 30"],"timeout_ms":null,"working_directory":null,"env":null,"user":null}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -837,6 +838,37 @@ func TestSessionLogAdapterLoadHistoryReportsOpenCodexToolCall(t *testing.T) {
 				t.Errorf("OpenToolUseIDs after abort = %v, want none", got)
 			}
 		})
+	}
+}
+
+func TestSessionLogAdapterLoadHistoryCarriesCodexLocalShellResult(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeLines(t, path,
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"ls-1","status":"completed","action":{"type":"exec","command":["bash","-lc","ls"],"timeout_ms":null,"working_directory":"/repo","env":null,"user":null}}}`,
+		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"ls-1","output":"{\"output\":\"README.md\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.1}}"}}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "codex/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(snapshot.Entries) != 2 || len(snapshot.Entries[0].Blocks) != 1 || len(snapshot.Entries[1].Blocks) != 1 {
+		t.Fatalf("snapshot entries = %+v, want a tool_use and its result", snapshot.Entries)
+	}
+	if use := snapshot.Entries[0].Blocks[0]; use.Kind != BlockKindToolUse || use.ToolUseID != "ls-1" {
+		t.Fatalf("first block = %+v, want tool_use ls-1", use)
+	}
+	result := snapshot.Entries[1].Blocks[0].StructuredResult
+	if result == nil {
+		t.Fatal("StructuredResult = nil")
+	}
+	if result.Kind != "bash" || result.Stdout != "README.md\n" {
+		t.Fatalf("StructuredResult = %+v, want bash stdout", result)
 	}
 }
 

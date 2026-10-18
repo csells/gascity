@@ -2151,7 +2151,7 @@ func isCommandTool(name string, input *StructuredToolInput) bool {
 		return true
 	}
 	switch name {
-	case "bash", "shell", "sh", "run_command", "exec_command", "shell_command", "terminal", "terminal.exec":
+	case "bash", "shell", "local_shell", "sh", "run_command", "exec_command", "shell_command", "terminal", "terminal.exec":
 		return true
 	default:
 		return false
