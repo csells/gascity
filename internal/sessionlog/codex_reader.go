@@ -315,6 +315,29 @@ func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, 
 			Raw: json.RawMessage(rawLine),
 		}
 
+	case "local_shell_call":
+		callID := firstNonEmpty(ri.CallID, ri.ID)
+		input := codexLocalShellInput(ri.Action)
+		if callID != "" {
+			toolContexts[callID] = codexToolCallContextFromInput("local_shell", input)
+		}
+		openCalls.open(callID)
+		return &Entry{
+			UUID:      uuid,
+			Type:      "assistant",
+			Timestamp: ts,
+			Message: mustMarshal(MessageContent{
+				Role: "assistant",
+				Content: mustMarshal([]ContentBlock{{
+					Type:  "tool_use",
+					ID:    callID,
+					Name:  "local_shell",
+					Input: input,
+				}}),
+			}),
+			Raw: json.RawMessage(rawLine),
+		}
+
 	case "web_search_call":
 		callID := firstNonEmpty(ri.CallID, ri.ID)
 		input := codexWebSearchInput(ri.Input, ri.Query, ri.Action)
@@ -555,6 +578,34 @@ func codexWebSearchInput(rawInput json.RawMessage, query string, action json.Raw
 		return nil
 	}
 	return mustMarshal(neutral)
+}
+
+// codexLocalShellInput builds a local_shell_call's tool input from its exec
+// action, in the shape of the shell tool's arguments: command, workdir and
+// timeout_ms. Codex answers the call with a function_call_output.
+func codexLocalShellInput(action json.RawMessage) json.RawMessage {
+	var exec struct {
+		Command          []string `json:"command"`
+		WorkingDirectory string   `json:"working_directory"`
+		TimeoutMS        *int64   `json:"timeout_ms"`
+	}
+	if json.Unmarshal(action, &exec) != nil {
+		return nil
+	}
+	input := make(map[string]any, 3)
+	if len(exec.Command) > 0 {
+		input["command"] = exec.Command
+	}
+	if workdir := strings.TrimSpace(exec.WorkingDirectory); workdir != "" {
+		input["workdir"] = workdir
+	}
+	if exec.TimeoutMS != nil {
+		input["timeout_ms"] = *exec.TimeoutMS
+	}
+	if len(input) == 0 {
+		return nil
+	}
+	return mustMarshal(input)
 }
 
 func codexActionString(raw json.RawMessage) string {
@@ -1681,7 +1732,7 @@ type codexPatchChange struct {
 }
 
 type codexResponseItem struct {
-	Type             string              `json:"type"` // message, reasoning, function_call, custom_tool_call, function_call_output, custom_tool_call_output, interaction
+	Type             string              `json:"type"` // message, reasoning, function_call, custom_tool_call, local_shell_call, function_call_output, custom_tool_call_output, interaction
 	Role             string              `json:"role,omitempty"`
 	Content          []codexContentBlock `json:"content,omitempty"`
 	Summary          []codexContentBlock `json:"summary,omitempty"`
