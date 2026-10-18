@@ -77,8 +77,12 @@ launch as well as resume: a non-interactive prompt can skip first-run screens
 that would block an interactive agent.
 
 Keep wrapper diagnostics out of the interactive terminal so they cannot overwrite
-startup menu options. Match `process_names` to the executable actually running
-inside the wrapper, and verify that Gas City still reports the agent alive after
+startup menu options. When `command` names a different executable than the
+inherited one, Gas City adds that executable's basename to the inherited
+`process_names` (unless you set `process_names` yourself). It does not add a
+shell or launcher such as `bash`, `sh` or `env`, so a wrapper script or shell
+command still needs an explicit `process_names` naming the executable actually
+running inside it. Verify that Gas City still reports the agent alive after
 startup and while it claims work.
 
 For copy-paste setup of each built-in harness — the env vars it reads and the

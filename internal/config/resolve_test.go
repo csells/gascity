@@ -292,6 +292,147 @@ func TestAgentProcessNamesPrefersAgentOverride(t *testing.T) {
 	}
 }
 
+// A custom provider that overrides the inherited command launches a different
+// executable, so liveness must also accept that executable's basename. The
+// claude npm package's real executable is bin/claude.exe; launched by path,
+// its Linux comm and argv[0] basename are "claude.exe", which the inherited
+// ["node", "claude"] never matches, and the reconciler then kills a live
+// session as a "zombie process".
+func TestAgentProcessNamesIncludesOverriddenCommandExecutable(t *testing.T) {
+	const claudeExe = "/home/tester/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+	tests := []struct {
+		name      string
+		provider  string
+		providers string
+		want      []string
+	}{
+		{
+			name:     "base chain with overridden command",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "` + claudeExe + `"
+`,
+			want: []string{"node", "claude", "claude.exe"},
+		},
+		{
+			name:     "legacy builtin-name override",
+			provider: "claude",
+			providers: `
+[providers.claude]
+command = "` + claudeExe + ` --verbose"
+`,
+			want: []string{"node", "claude", "claude.exe"},
+		},
+		{
+			name:     "same executable by path",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "/opt/claude/bin/claude"
+`,
+			want: []string{"node", "claude"},
+		},
+		{
+			name:     "shell command keeps inherited names",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "bash"
+args = ["-lc", "exec claude"]
+`,
+			want: []string{"node", "claude"},
+		},
+		{
+			name:     "sh by path keeps inherited names",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "/bin/sh -c claude"
+`,
+			want: []string{"node", "claude"},
+		},
+		{
+			name:     "env launcher keeps inherited names",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "/usr/bin/env CLAUDE_CONFIG_DIR=/tmp/c claude"
+`,
+			want: []string{"node", "claude"},
+		},
+		{
+			name:     "shell wrapper script keeps inherited names",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "/opt/wrappers/claude-wrapper.sh"
+`,
+			want: []string{"node", "claude"},
+		},
+		{
+			name:     "explicit process_names win",
+			provider: "my-claude",
+			providers: `
+[providers.my-claude]
+base = "builtin:claude"
+command = "` + claudeExe + `"
+process_names = ["my-claude-bin"]
+`,
+			want: []string{"my-claude-bin"},
+		},
+		{
+			name:     "child of an overriding parent keeps the parent's executable",
+			provider: "my-claude",
+			providers: `
+[providers.parent-claude]
+base = "builtin:claude"
+command = "` + claudeExe + `"
+
+[providers.my-claude]
+base = "provider:parent-claude"
+ready_delay_ms = 1
+`,
+			want: []string{"node", "claude", "claude.exe"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte("[workspace]\nname = \"city\"\n" + tt.providers))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got := AgentProcessNames(cfg, Agent{Name: "worker", Provider: tt.provider}, lookPathAll)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("AgentProcessNames() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeProviderOverBuiltinCommandOverrideLeavesEmptyProcessNamesEmpty(t *testing.T) {
+	// A base without process_names opts out of process liveness checks;
+	// overriding its command must not opt the child in.
+	result := MergeProviderOverBuiltin(ProviderSpec{Command: "base-cli"}, ProviderSpec{Command: "/opt/other-cli"})
+	if result.ProcessNames != nil {
+		t.Fatalf("ProcessNames = %v, want nil", result.ProcessNames)
+	}
+	base := ProviderSpec{Command: "base-cli", ProcessNames: []string{"base-cli"}}
+	result = MergeProviderOverBuiltin(base, ProviderSpec{Command: "/opt/other-cli --flag"})
+	if want := []string{"base-cli", "other-cli"}; !reflect.DeepEqual(result.ProcessNames, want) {
+		t.Fatalf("ProcessNames = %v, want %v", result.ProcessNames, want)
+	}
+	if want := []string{"base-cli"}; !reflect.DeepEqual(base.ProcessNames, want) {
+		t.Fatalf("base ProcessNames mutated to %v", base.ProcessNames)
+	}
+}
+
 func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", StartCommand: "my-agent --flag"}
