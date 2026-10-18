@@ -629,6 +629,48 @@ func TestReadCodexFileMarksExecCommandTextFailureResult(t *testing.T) {
 	}
 }
 
+func TestReadCodexFileMarksUserDeniedToolResult(t *testing.T) {
+	// Codex records a declined approval or an abort as plain output text with
+	// no error flag or exit code (codex-rs/core/src/tools/events.rs and
+	// tools/parallel.rs).
+	for _, tc := range []struct {
+		name, callType, toolName, outputType, output string
+		wantError                                    bool
+	}{
+		{"aborted custom call", "custom_tool_call", "exec", "custom_tool_call_output", "aborted by user after 7.2s", true},
+		{"aborted exec_command", "function_call", "exec_command", "function_call_output", "Wall time: 7.2 seconds\naborted by user", true},
+		{"declined exec_command", "function_call", "exec_command", "function_call_output", "exec command rejected by user", true},
+		{"declined apply_patch", "custom_tool_call", "apply_patch", "custom_tool_call_output", "patch rejected by user", true},
+		{"output mentioning an abort", "function_call", "exec_command", "function_call_output", "Command: grep -r abort .\nOutput:\nlog.txt: job aborted by user after 3.0s\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
+			call := map[string]any{"type": tc.callType, "call_id": "call-denied", "name": tc.toolName}
+			if tc.callType == "function_call" {
+				call["arguments"] = `{"cmd":"sleep 30"}`
+			} else {
+				call["input"] = "*** Begin Patch\n*** End Patch\n"
+			}
+			writeCodexReaderFixture(t, path,
+				map[string]any{"timestamp": "2026-06-01T00:00:00Z", "type": "response_item", "payload": call},
+				map[string]any{
+					"timestamp": "2026-06-01T00:00:07Z",
+					"type":      "response_item",
+					"payload":   map[string]any{"type": tc.outputType, "call_id": "call-denied", "output": tc.output},
+				},
+			)
+
+			sess, err := ReadCodexFile(path, 0)
+			if err != nil {
+				t.Fatalf("ReadCodexFile: %v", err)
+			}
+			if block := codexReaderToolResultBlock(t, sess, "call-denied"); block.IsError != tc.wantError {
+				t.Fatalf("IsError = %v, want %v; content = %s", block.IsError, tc.wantError, block.Content)
+			}
+		})
+	}
+}
+
 func TestReadCodexFileNormalizesJSONStringCommandResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-codex.jsonl")
 	writeCodexReaderFixture(t, path,

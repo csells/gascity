@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -831,8 +832,33 @@ func codexToolResultIsError(output json.RawMessage, content json.RawMessage, con
 	if hasExitCode && exitCode != 0 {
 		return true
 	}
+	if codexToolOutputIsUserDenial(codexOutputText(output)) {
+		return true
+	}
 	text := firstNonEmpty(codexOutputText(content), codexOutputText(output))
 	return codexTextLooksLikeError(text)
+}
+
+// codexUserDenialOutputs match the whole tool output Codex records when the
+// user declines an approval or aborts the turn while a call runs. Codex writes
+// these as plain text with no error flag, status or exit code.
+var codexUserDenialOutputs = []*regexp.Regexp{
+	// An exec_command call interrupted by an abort (tools/parallel.rs).
+	regexp.MustCompile(`^Wall time: \d+(\.\d+)? seconds\naborted by user$`),
+	// Any other call interrupted by an abort (tools/parallel.rs).
+	regexp.MustCompile(`^aborted by user after \d+(\.\d+)?s$`),
+	// A declined exec or patch approval (tools/events.rs).
+	regexp.MustCompile(`^(exec command|patch) rejected by user$`),
+}
+
+func codexToolOutputIsUserDenial(text string) bool {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	for _, pattern := range codexUserDenialOutputs {
+		if pattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexToolResultExitCode(values ...json.RawMessage) (int, bool) {
