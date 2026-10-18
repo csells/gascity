@@ -60,6 +60,9 @@ type codexTurnPane struct {
 	// paste is not a burst.
 	burstEatsEnter bool
 	burst          string
+	// scrollback is history above the pane's live screen, as a 120-row
+	// capture returns it.
+	scrollback []string
 	// buffers holds tmux paste buffers loaded with load-buffer.
 	buffers map[string]string
 
@@ -223,7 +226,7 @@ func (f *codexTurnPane) abortTurn() {
 }
 
 func (f *codexTurnPane) render(escapes bool) []string {
-	lines := []string{">_ OpenAI Codex (v0.162.1)", ""}
+	lines := append(slices.Clone(f.scrollback), ">_ OpenAI Codex (v0.162.1)", "")
 	if f.running && time.Since(f.turnStart) >= f.busyHiddenFor {
 		lines = append(lines, "• Working (1s • esc to interrupt)", "")
 	}
