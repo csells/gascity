@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -229,7 +231,9 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 // base. Non-zero city fields override; zero-value fields inherit the built-in
 // defaults. Slice fields (Args, ProcessNames, OptionsSchema) replace entirely
 // when non-nil. Map fields (Env, PermissionModes) merge additively (city keys
-// override base keys).
+// override base keys). A city Command that launches a different executable
+// than the base, with ProcessNames left unset, extends the inherited
+// ProcessNames with that executable's basename (see processNamesForCommand).
 //
 // Capability bools (EmitsPermissionWarning, SupportsACP, SupportsHooks)
 // are tri-state *bool: nil = inherit base, &true = enable, &false =
@@ -333,6 +337,8 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 	if city.ProcessNames != nil {
 		result.ProcessNames = city.ProcessNames
+	} else if city.Command != "" {
+		result.ProcessNames = processNamesForCommand(base.ProcessNames, base.Command, city.Command)
 	}
 	pruneOptionDefaults := map[string]bool{}
 	if city.OptionsSchema != nil {
@@ -394,6 +400,51 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 
 	return result
+}
+
+// processNamesForCommand returns the process names inherited from a base
+// whose command is baseCommand, for a layer that launches command instead.
+// Liveness matches a process by the basename of its executable, so when the
+// override runs a differently named executable (for example the claude npm
+// package's bin/claude.exe, whose comm is "claude.exe") the inherited names
+// alone would judge the live agent dead. The executable's basename is appended
+// rather than substituted: the inherited names stay valid for a wrapper that
+// execs the base binary. An empty inherited list stays empty, because a
+// provider without process names opts out of process liveness checks.
+//
+// A shell, launcher or shell script is never appended (see commandLaunchers
+// and shellScriptExtensions): zombie detection exists to catch a pane whose
+// agent died while its wrapper shell lives on, and accepting the shell's name
+// would read every such pane alive. Wrapper scripts and shells still need an
+// explicit process_names.
+func processNamesForCommand(inherited []string, baseCommand, command string) []string {
+	exe := filepath.Base(BinaryName(strings.TrimSpace(command)))
+	if len(inherited) == 0 || exe == "." || exe == string(filepath.Separator) {
+		return inherited
+	}
+	_, launcher := commandLaunchers[exe]
+	_, script := shellScriptExtensions[filepath.Ext(exe)]
+	if launcher || script ||
+		exe == filepath.Base(BinaryName(strings.TrimSpace(baseCommand))) || slices.Contains(inherited, exe) {
+		return inherited
+	}
+	return append(slices.Clone(inherited), exe)
+}
+
+// commandLaunchers are executables whose name says nothing about the agent
+// they start: shells and exec-style launchers. processNamesForCommand never
+// adds them to process_names.
+var commandLaunchers = map[string]struct{}{
+	"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {}, "mksh": {},
+	"fish": {}, "tcsh": {}, "csh": {},
+	"env": {}, "nohup": {}, "exec": {}, "nice": {}, "setsid": {}, "stdbuf": {},
+	"timeout": {}, "sudo": {}, "doas": {},
+}
+
+// shellScriptExtensions mark a command that is a shell script: its process is
+// the shell running it, so it is skipped like the shell itself.
+var shellScriptExtensions = map[string]struct{}{
+	".sh": {}, ".bash": {}, ".zsh": {}, ".ksh": {}, ".fish": {},
 }
 
 func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map[string]bool) {
