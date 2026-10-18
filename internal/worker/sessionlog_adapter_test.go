@@ -713,6 +713,85 @@ func TestSessionLogAdapterLoadHistoryCarriesCodexCommandFailure(t *testing.T) {
 	}
 }
 
+// A declined or aborted Codex tool call must reach clients the way Claude's
+// rejection does: an is_error tool_result classified user_rejection. Codex
+// writes the rejection as plain output text, then turn_aborted when the user
+// aborted rather than declined.
+func TestSessionLogAdapterLoadHistoryClassifiesCodexDeniedToolCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, call, output string
+	}{
+		{
+			"aborted custom call",
+			`{"type":"custom_tool_call","status":"completed","call_id":"call_deny","name":"exec","input":"text(await tools.exec_command({cmd:\"sleep 30\"}));\n"}`,
+			`{"type":"custom_tool_call_output","call_id":"call_deny","output":"aborted by user after 7.2s"}`,
+		},
+		{
+			"aborted exec_command",
+			`{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 30\"}","call_id":"call_deny"}`,
+			`{"type":"function_call_output","call_id":"call_deny","output":"Wall time: 7.2 seconds\naborted by user"}`,
+		},
+		{
+			"declined exec_command",
+			`{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 30\"}","call_id":"call_deny"}`,
+			`{"type":"function_call_output","call_id":"call_deny","output":"exec command rejected by user"}`,
+		},
+		{
+			"declined apply_patch",
+			`{"type":"custom_tool_call","status":"completed","call_id":"call_deny","name":"apply_patch","input":"*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch\n"}`,
+			`{"type":"custom_tool_call_output","call_id":"call_deny","output":"patch rejected by user"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeLines(t, path,
+				`{"timestamp":"2026-10-17T15:39:00.277Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","started_at":1792251540,"model_context_window":258400}}`,
+				`{"timestamp":"2026-10-17T15:39:00.334Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run sleep 30"}]}}`,
+				`{"timestamp":"2026-10-17T15:39:01.000Z","type":"response_item","payload":`+tc.call+`}`,
+				`{"timestamp":"2026-10-17T15:39:08.200Z","type":"response_item","payload":`+tc.output+`}`,
+				`{"timestamp":"2026-10-17T15:39:08.210Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<turn_aborted>\nThe previous turn was interrupted on purpose.\n</turn_aborted>"}]}}`,
+				`{"timestamp":"2026-10-17T15:39:08.220Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted","started_at":1792251540,"completed_at":1792251548,"duration_ms":8000}}`,
+			)
+
+			snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{Provider: "codex", TranscriptPath: path, GCSessionID: "gc-deny"})
+			if err != nil {
+				t.Fatalf("LoadHistory() error = %v", err)
+			}
+			var result *HistoryBlock
+			sawAbort := false
+			for i := range snapshot.Entries {
+				entry := &snapshot.Entries[i]
+				if entry.SystemEvent != nil && entry.SystemEvent.Kind == "turn_aborted" {
+					sawAbort = true
+				}
+				for j := range entry.Blocks {
+					if entry.Blocks[j].Kind == BlockKindToolResult && entry.Blocks[j].ToolUseID == "call_deny" {
+						result = &entry.Blocks[j]
+					}
+				}
+			}
+			if result == nil {
+				t.Fatalf("no tool_result for call_deny in %+v", snapshot.Entries)
+			}
+			if !sawAbort {
+				t.Error("turn_aborted is not surfaced as a turn_aborted system event")
+			}
+			if !result.IsError {
+				t.Errorf("IsError = false, want true (content %q)", result.ContentText)
+			}
+			if result.StructuredResult == nil || result.StructuredResult.Error == nil {
+				t.Errorf("StructuredResult = %+v, want a %s error", result.StructuredResult, toolErrorUserRejection)
+			} else if got := result.StructuredResult.Error; got.Category != toolErrorUserRejection {
+				t.Errorf("StructuredResult.Error = %+v, want category %s", *got, toolErrorUserRejection)
+			}
+			if snapshot.TailState.Activity != TailActivityIdle {
+				t.Errorf("Activity = %q, want idle after turn_aborted", snapshot.TailState.Activity)
+			}
+		})
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCarriesCodexTokenUsage(t *testing.T) {
 	t.Parallel()
 

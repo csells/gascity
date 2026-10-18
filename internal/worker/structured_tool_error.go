@@ -33,6 +33,10 @@ var structuredToolErrorPatterns = []structuredToolErrorPattern{
 	{regexp.MustCompile(`(?i)^\[Request interrupted by user`), toolErrorUserRejection},
 	{regexp.MustCompile(`(?i)^User canceled`), toolErrorUserRejection},
 	{regexp.MustCompile(`(?i)^Plan mode - tools not executed`), toolErrorUserRejection},
+	// Codex: a declined approval, and a call cut short by an abort.
+	{regexp.MustCompile(`(?i)^(exec command|patch) rejected by user$`), toolErrorUserRejection},
+	{regexp.MustCompile(`(?i)^aborted by user after \d+(\.\d+)?s$`), toolErrorUserRejection},
+	{regexp.MustCompile(`(?i)^Wall time: \d+(\.\d+)? seconds\r?\naborted by user$`), toolErrorUserRejection},
 	{regexp.MustCompile(`(?i)^Exit code[: ]+[1-9]\d*`), toolErrorCommandFailure},
 	{regexp.MustCompile(`(?i)^Process exited with code [1-9]\d*`), toolErrorCommandFailure},
 	{regexp.MustCompile(`(?i)ELIFECYCLE.*Command failed`), toolErrorCommandFailure},
