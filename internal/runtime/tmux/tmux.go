@@ -133,11 +133,12 @@ func (t *Tmux) refuseInterruptingSubmitWhileBusy(session string) error {
 	if err != nil {
 		return nil
 	}
-	keys := t.nudgeSubmitKeySequence(target)
+	family := t.nudgeSubmitFamily(target)
+	keys := nudgeSubmitKeySequenceForFamily(family)
 	if !submitSequenceInterrupts(keys) {
 		return nil
 	}
-	if busy, err := t.paneBusy(target); err != nil || !busy {
+	if busy, err := t.turnRunning(target, family); err != nil || !busy {
 		return nil
 	}
 	return fmt.Errorf("%w: session %q is still running a turn and its submit keys (%s) would interrupt it",
@@ -3092,15 +3093,21 @@ func BusyIndicatorReadable(family string) bool {
 // GC_PROVIDER pane environment variable, falling back to a process-name
 // sniff for panes without it (ad hoc sessions, some test harnesses).
 func (t *Tmux) nudgeSubmitKeySequence(target string) []string {
+	return nudgeSubmitKeySequenceForFamily(t.nudgeSubmitFamily(target))
+}
+
+// nudgeSubmitFamily is the provider family nudgeSubmitKeySequence resolves
+// for target, or "" for a pane it cannot identify.
+func (t *Tmux) nudgeSubmitFamily(target string) string {
 	if provider := t.providerEnv(target); provider != "" {
-		return nudgeSubmitKeySequenceForFamily(sessionlog.ProviderFamily(provider))
+		return sessionlog.ProviderFamily(provider)
 	}
 	for family := range nudgeSubmitKeySequences {
 		if t.targetLooksLikeProvider(target, family) {
-			return nudgeSubmitKeySequenceForFamily(family)
+			return family
 		}
 	}
-	return defaultNudgeSubmitKeySequence
+	return ""
 }
 
 // nudgeSubmitKeySettle is the pause between successive keys within a
@@ -3445,11 +3452,17 @@ func (t *Tmux) nudgeSession(
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
+		busy := func() (bool, error) { return t.paneBusy(target) }
 		var mayResend func() (bool, error)
 		if interrupts {
-			mayResend = func() (bool, error) { return t.submitStillWaiting(target) }
+			// An interrupting submit is held and sent on the live screen's
+			// turn state alone (turnRunning), so a stale busy row in the
+			// scrollback cannot hold it back for good.
+			family := t.nudgeSubmitFamily(target)
+			busy = func() (bool, error) { return t.turnRunning(target, family) }
+			mayResend = func() (bool, error) { return t.submitStillWaiting(target, family) }
 		}
-		confirmed, sawIdle, sent, err := submitAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, mayResend, time.Sleep)
+		confirmed, sawIdle, sent, err := submitAndConfirm(sendSubmit, wake, busy, mayResend, time.Sleep)
 		if isLookRefusal(err) {
 			delivered = prompt.submitsSent > 0
 			return prompt.refused(err)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 // so the caller delivers later. A pane the looks cannot read as either keeps
 // the historical behavior and is typed into once the wait runs out.
 func (t *Tmux) awaitIdleComposerBeforeTyping(session, target string, submitKeys []string) error {
+	family := t.nudgeSubmitFamily(target)
 	prefixes := []string{t.resolveIdlePromptPrefix(session)}
 	if marker, ok := t.stagedDraftMarkerFor(target); ok {
 		prefixes = append(prefixes, marker.promptPrefix)
@@ -48,7 +50,7 @@ func (t *Tmux) awaitIdleComposerBeforeTyping(session, target string, submitKeys 
 				return err
 			}
 			idle, busy = 0, false
-		case paneContainsBusyIndicator(lines):
+		case paneShowsRunningTurn(lines, family):
 			idle, busy = 0, true
 		case composerReadyForInput(lines, prefixes):
 			idle, busy = idle+1, false
@@ -70,6 +72,63 @@ func (t *Tmux) awaitIdleComposerBeforeTyping(session, target string, submitKeys 
 	return nil
 }
 
+// turnRunning reports whether target's agent, of provider family, is running
+// a turn, read the way a submit whose keys would interrupt one must read it
+// (see paneShowsRunningTurn).
+func (t *Tmux) turnRunning(target, family string) (bool, error) {
+	lines, err := t.CapturePaneLines(target, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+	return paneShowsRunningTurn(lines, family), nil
+}
+
+// codexTurnStatusRows bounds the rows read above Codex's live composer for
+// its status: the "• Working (… esc to interrupt)" row and the queued
+// follow-ups Codex lists under it.
+const codexTurnStatusRows = 6
+
+// paneShowsRunningTurn reports whether lines, the bottom of a pane running
+// family, show a turn in progress now.
+//
+// For Codex it reads the live screen relative to the composer: the turn's
+// status row sits in the block of rows right above the live composer (the
+// last composer prompt), and only Codex's own "esc to interrupt" there
+// counts. The rest of the capture is history. Codex leaves an earlier bottom
+// pane, Working row and composer included, in the scrollback when an approval
+// overlay redraws the screen (approvals.repeated, codex-cli 0.162.1): read
+// anywhere in the capture, that stale row held every later Escape-led submit
+// back as busy for good, and a transcript row shaped like another provider's
+// indicator (a tool's "(2s · 3.1 MB)" reads as Claude's spinner) did the same.
+// A Codex pane with no composer on screen cannot be read that way and falls
+// back to Codex's indicator anywhere in lines. Every other family keeps
+// paneContainsBusyIndicator.
+func paneShowsRunningTurn(lines []string, family string) bool {
+	if family != "codex" {
+		return paneContainsBusyIndicator(lines)
+	}
+	const codexBusy = "esc to interrupt"
+	composer := -1
+	for i, line := range lines {
+		if matchesPromptPrefix(line, codexPromptPrefix) {
+			composer = i
+		}
+	}
+	if composer < 0 {
+		return slices.ContainsFunc(lines, func(line string) bool { return strings.Contains(line, codexBusy) })
+	}
+	row := composer - 1
+	for row >= 0 && strings.TrimSpace(lines[row]) == "" {
+		row--
+	}
+	for n := 0; row >= 0 && n < codexTurnStatusRows && strings.TrimSpace(lines[row]) != ""; row, n = row-1, n+1 {
+		if strings.Contains(lines[row], codexBusy) {
+			return true
+		}
+	}
+	return false
+}
+
 // composerReadyForInput reports whether lines show an idle ready prompt for
 // one of prefixes, from a Codex that has finished starting.
 func composerReadyForInput(lines []string, prefixes []string) bool {
@@ -88,8 +147,8 @@ func composerReadyForInput(lines []string, prefixes []string) bool {
 // sitting unsubmitted in its composer: the one state in which sending an
 // interrupting submit sequence again is safe and needed. Busy is read from a
 // plain capture, the composer from one with dim placeholder text removed.
-func (t *Tmux) submitStillWaiting(target string) (bool, error) {
-	busy, err := t.paneBusy(target)
+func (t *Tmux) submitStillWaiting(target, family string) (bool, error) {
+	busy, err := t.turnRunning(target, family)
 	if err != nil || busy {
 		return false, err
 	}
