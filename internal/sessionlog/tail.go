@@ -34,11 +34,40 @@ type ContextUsage struct {
 // tailChunkSize is how many bytes we read from the end of the file.
 const tailChunkSize = 64 * 1024
 
+// maxActivityScanBytes caps how far ExtractTailMeta widens its window when the
+// tailChunkSize window holds no record that defines activity. Claude Code
+// writes request-capture records (api-request-shape, api-request-blob,
+// api-request) after the prompt that starts a turn; none of them defines
+// activity, and together they can exceed tailChunkSize, so the prompt falls out
+// of the fixed window and the turn reads as unknown. Those records run to tens
+// or hundreds of KB, well inside this cap.
+//
+// The cap is a latency budget for transcripts that never define activity in a
+// form InferActivity reads: each widening re-reads and re-parses the whole
+// window, so such a transcript costs about twice the cap per call instead of
+// one tailChunkSize read: measured at ~0.5ms for the fixed window, ~14ms with
+// a 1MB cap and ~56ms with this one. Keep it far below maxUsageScanBytes, and
+// below maxTailTokenBytes for the reason documented there.
+const maxActivityScanBytes = 4 * 1024 * 1024
+
 // ExtractTailMeta reads the last portion of a session file to extract
 // model and context usage without full DAG resolution. Returns nil (no
 // error) if the file has no usable data. A gc ACP capture (IsACPCapturePath)
 // yields only activity, derived from its JSON-RPC prompt/response pairing.
+//
+// Model, context usage and the malformed-tail flag come from the last
+// tailChunkSize bytes. Activity comes from the newest record that defines it:
+// when that window holds none and the file extends before it, the window
+// doubles until one is found, the whole file is in view, or
+// maxActivityScanBytes is reached.
 func ExtractTailMeta(path string) (*TailMeta, error) {
+	return extractTailMeta(path, maxActivityScanBytes)
+}
+
+// extractTailMeta is ExtractTailMeta with the activity scan cap supplied by
+// the caller, so tests can drive the cap branch without building a
+// multi-megabyte transcript.
+func extractTailMeta(path string, maxScanBytes int64) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -49,16 +78,46 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 		return extractACPCaptureTailMeta(f)
 	}
 
-	data, startsMidLine, err := readTail(f)
+	// One size snapshot for every window, so a widened window is a strict
+	// superset of the first even while the transcript is being appended to.
+	size, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
 	}
+	meta, truncated, err := extractTailMetaWindow(f, size, tailChunkSize)
+	if err != nil {
+		return nil, err
+	}
+	for window := int64(tailChunkSize); truncated && (meta == nil || meta.Activity == "") && window < maxScanBytes; {
+		window = min(window*2, maxScanBytes)
+		var wider *TailMeta
+		wider, truncated, err = extractTailMetaWindow(f, size, window)
+		if err != nil {
+			return nil, err
+		}
+		if wider == nil || wider.Activity == "" {
+			continue
+		}
+		if meta == nil {
+			meta = &TailMeta{}
+		}
+		meta.Activity = wider.Activity
+	}
+	return meta, nil
+}
 
+// extractTailMetaWindow extracts tail metadata from the last n bytes of a file
+// of the given size, and reports whether bytes before that window were omitted.
+func extractTailMetaWindow(r io.ReadSeeker, size, n int64) (*TailMeta, bool, error) {
+	data, startsMidLine, truncated, err := readTailWindowAt(r, size, n)
+	if err != nil {
+		return nil, false, err
+	}
 	lines, err := splitLines(data)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return extractFromLines(lines, startsMidLine), nil
+	return extractFromLines(lines, startsMidLine), truncated, nil
 }
 
 // ExtractTailMetaFromSearchPaths reads tail metadata only after verifying

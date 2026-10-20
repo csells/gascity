@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -528,5 +529,97 @@ func writeTailJSONL(t *testing.T, path string, lines []map[string]any) {
 		if err := enc.Encode(line); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// activityBehindLargeRecordsTranscript writes a finished turn, then lastRecord
+// (the newest record that defines activity), then padBytes of records that
+// define no activity at all. Claude Code 2.1.302 writes records of this kind
+// (api-request-shape, api-request-blob, api-request) right after a prompt, and
+// they can exceed tailChunkSize on their own.
+func activityBehindLargeRecordsTranscript(t *testing.T, lastRecord map[string]any, padBytes int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []map[string]any{
+		{"type": "user", "message": map[string]any{"role": "user", "content": "start"}},
+		{"type": "assistant", "message": map[string]any{
+			"role": "assistant", "model": "claude-opus-4-5-20251101",
+			"stop_reason": "end_turn", "content": "ready",
+			"usage": map[string]any{"input_tokens": 1000},
+		}},
+		{"type": "system", "subtype": "turn_duration"},
+		lastRecord,
+	}
+	const recordBytes = 16 * 1024
+	for written := 0; written < padBytes; written += recordBytes {
+		lines = append(lines, map[string]any{
+			"type":    "api-request-blob",
+			"message": map[string]any{"role": "system", "content": strings.Repeat("x", recordBytes)},
+		})
+	}
+	writeTailJSONL(t, path, lines)
+	return path
+}
+
+// The newest activity-defining record can sit further back than tailChunkSize
+// when the records after it define no activity. ExtractTailMeta must widen its
+// window to find it rather than report unknown activity, whichever activity
+// that record defines.
+func TestExtractTailMetaFindsActivityBehindRecordsLargerThanTailChunk(t *testing.T) {
+	tests := []struct {
+		name       string
+		lastRecord map[string]any
+		wantAct    string
+	}{
+		{
+			name:       "submitted prompt → in-turn",
+			lastRecord: map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": "next"}},
+			wantAct:    "in-turn",
+		},
+		{
+			name:       "turn end → idle",
+			lastRecord: map[string]any{"type": "system", "subtype": "turn_duration"},
+			wantAct:    "idle",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := activityBehindLargeRecordsTranscript(t, tt.lastRecord, 5*tailChunkSize/4)
+
+			meta, err := ExtractTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta == nil {
+				t.Fatalf("ExtractTailMeta = nil, want Activity %q", tt.wantAct)
+			}
+			if meta.Activity != tt.wantAct {
+				t.Errorf("Activity = %q, want %q", meta.Activity, tt.wantAct)
+			}
+		})
+	}
+}
+
+// The widening scan is bounded: an activity record further back than the cap
+// stays unknown instead of costing a read of the whole transcript. The cap is
+// injected so the branch is reachable without a multi-megabyte fixture.
+func TestExtractTailMetaActivityScanStopsAtCap(t *testing.T) {
+	prompt := map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": "next"}}
+	path := activityBehindLargeRecordsTranscript(t, prompt, 3*tailChunkSize)
+
+	meta, err := extractTailMeta(path, 2*tailChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil && meta.Activity != "" {
+		t.Errorf("Activity = %q, want unknown when the record is beyond the cap", meta.Activity)
+	}
+
+	meta, err = extractTailMeta(path, 4*tailChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil || meta.Activity != "in-turn" {
+		t.Errorf("TailMeta = %#v, want Activity %q once the cap covers the record", meta, "in-turn")
 	}
 }
