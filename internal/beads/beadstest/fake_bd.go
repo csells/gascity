@@ -395,9 +395,38 @@ func (f *FakeBd) depList(flags map[string][]string, ids []string) ([]byte, error
 	return json.Marshal(out)
 }
 
+// fakeBdUpdateFlags are the `bd update` flags the fake applies. An update
+// carrying any other flag fails, so a BdStore write the fake does not model
+// fails its case instead of reporting success with the write dropped.
+var fakeBdUpdateFlags = map[string]bool{
+	"--json": true, "--status": true, "-s": true, "--title": true, "--assignee": true,
+	"--description": true, "--set-metadata": true, "--unset-metadata": true,
+	"--if-status": true, "--if-assignee": true,
+}
+
+// fakeBdPreconditionError is bd's refusal of an --if-status/--if-assignee
+// update whose precondition does not hold: exit 13 with nothing written, which
+// BdStore reads as a lost compare-and-swap rather than a failure.
+type fakeBdPreconditionError struct{ msg string }
+
+func (e fakeBdPreconditionError) Error() string { return e.msg }
+
+// ExitCode is bd's precondition exit status.
+func (fakeBdPreconditionError) ExitCode() int { return 13 }
+
 func (f *FakeBd) update(flags map[string][]string, positional []string) ([]byte, error) {
+	for name := range flags {
+		if !fakeBdUpdateFlags[name] {
+			return nil, fmt.Errorf("fake bd update: unsupported flag %s", name)
+		}
+	}
 	if len(positional) == 0 {
 		return nil, fmt.Errorf("fake bd update: want at least one id")
+	}
+	for _, id := range positional {
+		if err := f.checkUpdatePreconditions(id, flags); err != nil {
+			return nil, err
+		}
 	}
 	var opts beads.UpdateOpts
 	if v, ok := lastFlag(flags, "--status", "-s"); ok {
@@ -419,12 +448,32 @@ func (f *FakeBd) update(flags map[string][]string, positional []string) ([]byte,
 		}
 		opts.Metadata[k] = v
 	}
+	// bd applies every unset after every set, as the store does.
+	opts.UnsetMetadata = flags["--unset-metadata"]
 	for _, id := range positional {
 		if err := f.store.Update(id, opts); err != nil {
 			return nil, fmt.Errorf("no issue found matching %q: %w", id, err)
 		}
 	}
 	return f.show(positional)
+}
+
+// checkUpdatePreconditions applies bd's --if-status and --if-assignee: the
+// update runs only when the bead holds exactly that status and assignee.
+func (f *FakeBd) checkUpdatePreconditions(id string, flags map[string][]string) error {
+	wantStatus, fenceStatus := lastFlag(flags, "--if-status")
+	wantAssignee, fenceAssignee := lastFlag(flags, "--if-assignee")
+	if !fenceStatus && !fenceAssignee {
+		return nil
+	}
+	current, err := f.store.Get(id)
+	if err != nil {
+		return fmt.Errorf("no issue found matching %q: %w", id, err)
+	}
+	if (fenceStatus && current.Status != wantStatus) || (fenceAssignee && current.Assignee != wantAssignee) {
+		return fakeBdPreconditionError{msg: fmt.Sprintf("fake bd update %s: precondition failed: status %q assignee %q", id, current.Status, current.Assignee)}
+	}
+	return nil
 }
 
 func (f *FakeBd) closeIssues(flags map[string][]string, ids []string) ([]byte, error) {
