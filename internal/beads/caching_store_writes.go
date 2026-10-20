@@ -35,7 +35,8 @@ func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, er
 }
 
 func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalCreate()
+	defer endWrite()
 	created, err := create()
 	if err != nil {
 		return created, err
@@ -79,7 +80,8 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 // missed optimization: a cached-row skip cannot tell a stale match from a
 // current one.
 func (c *CachingStore) Update(id string, opts UpdateOpts) error {
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	var generation uint64
 	if updateCloses(opts) {
 		generation = c.beginCloseIntent(id)
@@ -105,7 +107,8 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
 	}
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	var generation uint64
 	if updateCloses(opts) {
 		generation = c.beginCloseIntent(id)
@@ -146,7 +149,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq, genera
 		// Only a held row's close is announced, once: a held row already
 		// closed was announced by whoever installed it, unless a read queued
 		// that close and has not drained it yet.
-		notifyClosed = notifyClosed && !announcedElsewhere && c.claimCloseLocked(id, false, raced)
+		notifyClosed = notifyClosed && !announcedElsewhere && c.claimCloseLocked(id, &closed, false, raced)
 		if !raced {
 			seq := c.noteLocalMutationLocked(id)
 			c.tombstoneLocked(id, seq)
@@ -208,6 +211,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq, genera
 		seqMode:        seqKeep,
 		clearDirty:     true,
 		closeAnnounced: eventType == "bead.closed",
+		closeClaimed:   updateCloses(opts),
 	})
 	if opts.Status != nil {
 		c.clearDependentReadyProjectionsLocked(id)
@@ -226,7 +230,8 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	if !ok {
 		return false, ErrConditionalReleaseUnsupported
 	}
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	released, err := releaser.ReleaseIfCurrent(id, expectedAssignee)
 	if err != nil || !released {
 		return released, err
@@ -286,7 +291,8 @@ func (c *CachingStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (b
 	if !ok {
 		return false, ErrConditionalTransferUnsupported
 	}
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	moved, err := mover.TransferIfCurrent(id, fromAssignee, toAssignee)
 	if err != nil || !moved {
 		return moved, err
@@ -363,7 +369,8 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 	if !ok {
 		return Bead{}, false, ErrClaimUnsupported
 	}
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	claimed, acquired, err := claimer.Claim(id, assignee)
 	if err != nil || !acquired {
 		return claimed, acquired, err
@@ -410,7 +417,8 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	generation := c.beginCloseIntent(id)
 	if err := c.backing.Close(id); err != nil {
 		c.endCloseIntent(id, generation)
@@ -447,7 +455,7 @@ func (c *CachingStore) Close(id string) error {
 	setBeadStatus(&closed, "closed")
 	// A concurrent read that installed and announced this close first owns
 	// the announcement; announcing again here would duplicate it.
-	announce := found && !announcedElsewhere && c.claimCloseLocked(id, true, raced)
+	announce := found && !announcedElsewhere && c.claimCloseLocked(id, &closed, true, raced)
 	if announce {
 		c.noteCloseClaimedLocked(id, generation)
 	}
@@ -465,6 +473,7 @@ func (c *CachingStore) Close(id string) error {
 				seqMode:        seqKeep,
 				clearDirty:     refreshed,
 				closeAnnounced: announce,
+				closeClaimed:   true,
 			})
 		}
 		if c.clearDependentReadyProjectionsLocked(id) || found {
@@ -482,7 +491,8 @@ func (c *CachingStore) Close(id string) error {
 
 // Reopen marks a bead as open in the backing store and cache.
 func (c *CachingStore) Reopen(id string) error {
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	if err := c.backing.Reopen(id); err != nil {
 		return err
 	}
@@ -564,9 +574,16 @@ func (c *CachingStore) Reopen(id string) error {
 	return nil
 }
 
-// CloseAll closes multiple beads and sets metadata on each.
+// CloseAll closes multiple beads and sets metadata on each. An empty id list
+// touches no row, so it goes to the backing without the in-flight
+// registration, which with no ids would fence every yielding refresh as a
+// blind write.
 func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
-	startSeq := c.currentMutationSeq()
+	if len(ids) == 0 {
+		return c.backing.CloseAll(ids, metadata)
+	}
+	startSeq, endWrite := c.beginLocalWrite(ids...)
+	defer endWrite()
 	n, err := c.backing.CloseAll(ids, metadata)
 	if err != nil && n == 0 {
 		return n, err
@@ -605,13 +622,16 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		// CloseAll announces only closes of rows it had cached, and only the
 		// ones no concurrent read announced first.
 		_, skip := raced[item.id]
-		announce := item.bead.Status == "closed" && c.claimCloseLocked(item.id, false, skip)
+		announce := item.bead.Status == "closed" && c.claimCloseLocked(item.id, &item.bead, false, skip)
 		if !skip {
 			opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 			if item.bead.Status == "closed" {
 				opts.depsMode = depsDrop
-				// Announced below whenever this close is claimed.
-				opts.closeAnnounced = true
+				// Announced below exactly when this close is claimed; an
+				// unclaimed closed row over no cached row stays marked
+				// silently installed (silentCloses), so the feed's refresh
+				// still announces it.
+				opts.closeAnnounced = announce
 			}
 			c.absorbFreshLocked(item.id, item.bead, c.clockNow(), opts)
 			if item.bead.Status == "closed" {
@@ -635,7 +655,8 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 // SetMetadata sets a single metadata key-value on a bead.
 func (c *CachingStore) SetMetadata(id, key, value string) error {
 	kvs := map[string]string{key: value}
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	if err := c.backing.SetMetadata(id, key, value); err != nil {
 		return err
 	}
@@ -648,7 +669,8 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	if len(kvs) == 0 {
 		return nil
 	}
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
 		// The backing may have rejected, partially committed, or fully committed
 		// the batch before returning an error. Fence the cached pre-write row
@@ -777,7 +799,8 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 		return errors.New("beads tx: nil callback")
 	}
 	tx := newCachingStoreTx()
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite()
+	defer endWrite()
 	if err := c.backing.Tx(commitMsg, func(backingTx Tx) error {
 		tx.backing = backingTx
 		return fn(tx)
@@ -925,7 +948,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			}
 			// A closed row this refresh owns is announced as bead.closed; one
 			// a concurrent read already announced is not.
-			announceClose := fresh.Status == "closed" && c.claimCloseLocked(item.id, true, skip)
+			announceClose := fresh.Status == "closed" && c.claimCloseLocked(item.id, &fresh, true, skip)
 			if !skip {
 				c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
 					depsMode:   depsFromFieldsIfCarried,
@@ -952,7 +975,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 		}
 		if item.closed {
 			if b, ok := c.patchedCachedRowLocked(item.id, func(b *Bead) { setBeadStatus(b, "closed") }); ok {
-				announceClose := c.claimCloseLocked(item.id, true, skip)
+				announceClose := c.claimCloseLocked(item.id, &b, true, skip)
 				if !skip {
 					// The patch reflects only this write, so any mark stands.
 					c.absorbFreshLocked(item.id, b, now, absorbOpts{
@@ -985,7 +1008,8 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 
 // DepAdd adds a dependency and updates the cache.
 func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(issueID)
+	defer endWrite()
 	if err := c.backing.DepAdd(issueID, dependsOnID, depType); err != nil {
 		return err
 	}
@@ -1045,7 +1069,8 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 // DepRemove removes a dependency and updates the cache.
 func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
-	startSeq := c.currentMutationSeq()
+	startSeq, endWrite := c.beginLocalWrite(issueID)
+	defer endWrite()
 	if err := c.backing.DepRemove(issueID, dependsOnID); err != nil {
 		return err
 	}
@@ -1099,6 +1124,8 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 
 // Delete passes through to the backing store and removes from cache.
 func (c *CachingStore) Delete(id string) error {
+	_, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	deleted, haveDeleted := c.snapshotBeadBeforeDelete(id)
 	if err := c.backing.Delete(id); err != nil {
 		return err
@@ -1146,6 +1173,8 @@ func (c *CachingStore) DeleteBatch(ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	_, endWrite := c.beginLocalWrite(ids...)
+	defer endWrite()
 
 	// Snapshot bead.deleted payloads from the cache only. Unlike Delete, which
 	// reads each snapshot from the backing store, forwarding N backing Get calls

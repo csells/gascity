@@ -114,13 +114,16 @@ type CityRuntime struct {
 	// drainedLastTick records, per suspended scope root, whether its sessions
 	// were already drained on the previous tick (retireSuspendedScopes).
 	drainedLastTick map[string]bool
-	cityPath        string
-	cityName        string
-	configName      string
-	tomlPath        string
-	watchTargets    []config.WatchTarget
-	configRev       string
-	configDirty     *atomic.Bool
+	// bootCityStore is the bd store binding the city's boot lifecycle left
+	// behind; reload refuses to run against, or adopt, any other.
+	bootCityStore cityStoreRecord
+	cityPath      string
+	cityName      string
+	configName    string
+	tomlPath      string
+	watchTargets  []config.WatchTarget
+	configRev     string
+	configDirty   *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration
@@ -178,6 +181,11 @@ type CityRuntime struct {
 	// split applied to the sweep that was 48.5% of the tick (ga-l7jdg).
 	detachedOrphan     *detachedOrphanLane
 	detachedOrphanOnce sync.Once
+
+	// claimLoop is the claim-loop guard (claim_loop_guard.go), fed by the same
+	// journal feed as the delta lanes; created on first use.
+	claimLoop     *claimLoopGuard
+	claimLoopOnce sync.Once
 
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
@@ -427,7 +435,7 @@ type CityRuntimeParams struct {
 }
 
 var (
-	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycleForReload
 	cityRuntimeReloadLifecycleRetryDelay = time.Second
 	// reloadActiveTTL bounds how long a single accepted reload may occupy
 	// the activeReload slot. If a reconciler tick wedges in something that
@@ -523,6 +531,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	cr := &CityRuntime{
 		storageRoutes:           routes,
+		bootCityStore:           bootCityStoreFor(p.CityPath),
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -2582,6 +2591,24 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
+			// Rig metadata may be adopted live; the city's store binding may
+			// not, since rebinding the city store is restart-only.
+			if cityUsesBdStoreContract(cityRoot) {
+				if storeErr := checkReloadCityStore(cityRoot, cr.bootCityStore); storeErr != nil {
+					err := fmt.Errorf("config reload: %w", storeErr)
+					fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+					telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+					if trace != nil {
+						trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+					}
+					return reloadControlReply{
+						Outcome:  reloadOutcomeFailed,
+						Error:    err.Error(),
+						Revision: result.Revision,
+						Warnings: warnings,
+					}
+				}
+			}
 			if !cr.cs.updateFromRuntime(result.Cfg, cr.sp, result.Revision) {
 				return rejectSuperseded("during same-revision metadata publication")
 			}
@@ -2701,7 +2728,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {
-		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr)
+		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.bootCityStore, cr.stderr)
 		if lifecycleErr == nil {
 			break
 		}
@@ -2942,7 +2969,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
-	cr.configRev = result.Revision
+	cr.adoptConfigRevision(result.Revision)
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
 	if trace != nil {
@@ -5305,4 +5332,14 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// adoptConfigRevision records rev as the configuration this runtime runs. A
+// changed revision resets the claim-loop guard: the new config may have fixed
+// what held claims were failing on.
+func (cr *CityRuntime) adoptConfigRevision(rev string) {
+	if rev != cr.configRev {
+		cr.claimLoopGuardOf().configChanged()
+	}
+	cr.configRev = rev
 }

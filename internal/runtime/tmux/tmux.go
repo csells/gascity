@@ -261,8 +261,11 @@ var (
 	// ack the item, so it requeues after the normal retry delay and consumes
 	// one of its bounded attempts, exactly like any other delivery failure.
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
-	// exactly what lets a stalled nudge go undetected for many minutes.
-	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// exactly what lets a stalled nudge go undetected for many minutes. It
+	// wraps runtime.ErrNudgeDeliveryUnconfirmed: the message may also have
+	// been delivered, so a caller that must not deliver twice treats it as
+	// possibly delivered.
+	ErrNudgeSubmitUnconfirmed = fmt.Errorf("%w: submit Enter delivered to tmux but not confirmed (busy state never observed)", runtime.ErrNudgeDeliveryUnconfirmed)
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -2795,9 +2798,11 @@ const (
 //     window, and its busy proves nothing about this submit.
 //   - err: the last submit attempted failed at the tmux layer, or a look
 //     refused a submit (isLookRefusal), which ends the call with no further
-//     sends. A nil error with confirmed false means the submit reached tmux
-//     but no idle->busy transition was observed within the budget; the
-//     caller judges delivery from the pane itself (see nudgeSession).
+//     sends. A failed re-send after an earlier send succeeded wraps
+//     ErrNudgeSubmitUnconfirmed: the earlier send may have submitted. A nil
+//     error with confirmed false means the submit reached tmux but no
+//     idle->busy transition was observed within the budget; the caller
+//     judges delivery from the pane itself (see nudgeSession).
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
@@ -2857,6 +2862,11 @@ func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, e
 					return false, watch.seenIdle, sent, err
 				}
 				lastErr = err
+				if sent > 0 {
+					// An earlier send reached the pane and may have
+					// submitted: a failed re-send leaves delivery in doubt.
+					lastErr = fmt.Errorf("%w: re-send failed: %w", ErrNudgeSubmitUnconfirmed, err)
+				}
 				continue
 			}
 			sent++
@@ -3330,7 +3340,7 @@ func (t *Tmux) nudgeSession(
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+		return fmt.Errorf("%w: nudge lock timeout for session %q: previous nudge may be hung", runtime.ErrNudgeNotSent, session)
 	}
 	defer releaseNudgeLock(session)
 

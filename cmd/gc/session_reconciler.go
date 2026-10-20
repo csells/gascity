@@ -3508,6 +3508,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
+				// A pinned configured named session is never stopped on a
+				// recycler restart request: the restart-request guard below
+				// clears the marker and ends the tick for it. Requesting one
+				// anyway repeats that on every tick the session stays idle, and
+				// each of those ticks ends before the config-drift gate, so a
+				// pending drift is neither logged nor recorded as deferred.
+				if !exempt && pinnedConfiguredNamedSessionKillProtected(infoByID[id]) {
+					exempt = true
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonPinned, TraceOutcomeExempt, tp.TemplateName, name, nil)
+					}
+				}
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 					if attachErr != nil {
@@ -5437,8 +5449,10 @@ func idleRespawnAckUnsafeToStop(
 // state cache after a `gc session kill`), and a heal on it wrote state=awake
 // over the killed row, which the next pass restarted in place on its claim
 // instead of freeing the slot. A fresh read that fails wakes nothing. The
-// pass's first confirmation fixes since, so the later ones reuse the fresh
-// listing (and process snapshot) it took rather than each paying for one.
+// pass's first confirmation fixes since, so a later one reuses a refreshed
+// snapshot an earlier one published rather than each paying for a refresh. A
+// provider may prove an absent name without publishing (tmux's presence-only
+// listing), so each absent confirmation pays its own cheap listing.
 type healAliveConfirmer struct {
 	sp    runtime.Provider
 	since time.Time

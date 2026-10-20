@@ -121,6 +121,21 @@ var ErrSessionNotFound = errors.New("session not found")
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
+// ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
+// session but the provider could not confirm it took: the message may have
+// been delivered, or may still sit unsubmitted in the session's input.
+// Callers that retry may count it as a failed attempt; callers that must not
+// deliver twice treat the nudge as possibly delivered. Providers wrap their
+// own unconfirmed submits with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
+
+// ErrNudgeNotSent reports that a nudge failed before any of its input
+// reached the session: nothing was delivered, so a retry cannot deliver the
+// message twice. Providers wrap their own pre-send failures with this
+// sentinel so callers can dispatch with errors.Is.
+var ErrNudgeNotSent = errors.New("nudge not sent")
+
 // ErrSessionBusy reports that a nudge was deferred, not delivered: the session
 // was still running a turn when the provider's wait for idle ran out, and the
 // provider's submit keys would have interrupted that turn. Nothing was typed

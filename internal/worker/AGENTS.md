@@ -44,11 +44,15 @@ when the context ends. Take the bound from the caller's own context.
 - At most one observation per key is in flight. While an earlier one has not
   returned, a new call gets `ErrObservationOutstanding` (also
   `runtime.ErrRuntimeUnavailable`) and starts nothing, so a wedged session
-  costs one goroutine, not one per call.
-- The key names what is observed: one session in one city. Every caller that
-  observes the same session must derive the key the same way, or the
-  one-in-flight limit no longer holds. `cmd/gc` derives it in
-  `postStartObservationKey`.
+  costs one goroutine per key, not one per call.
+- The key names what is observed, one session in one city, within a caller
+  namespace. Every caller in a namespace must derive the key the same way, or
+  the one-in-flight limit no longer holds. `cmd/gc` has two namespaces, so a
+  wedged session can hold one goroutine in each: session lifecycle keys by
+  session name (`postStartObservationKey`), and the conversation lane's
+  executor keys by session bead ID under the `lane` prefix
+  (`laneObservationKey`), so a wedged lane probe never blocks a lifecycle
+  observation.
 - `worker.ObserveShared` is the form for reads several callers make of one key
   at once (turn reads: `CurrentTurn`, `WatchTurns` and its session reload, the
   idle overlay). A call
@@ -59,7 +63,17 @@ when the context ends. Take the bound from the caller's own context.
   with one type: a joiner of another type's observation gets an unavailable
   error, not its answer. Turn keys (`turnObservationKey`) name the city
   directory and the session, for a `SessionHandle` and a `RuntimeHandle` alike
-  (`RuntimeHandleConfig.CityPath`).
+  (`RuntimeHandleConfig.CityPath`). A turn read made under the session
+  mutation lock (the turn-scoped interrupt's check) joins no shared read: its
+  session load and runtime probes go through `ObserveBounded` under a
+  `locked-` turn key of their own (`observeTurnRead`), so a shared read that
+  began before the lock, holding the session as it was then, never answers
+  it. Its failure direction is the opposite of a watcher's: a watcher leaves
+  a turn open on an idle reading it did not get, while the check refuses as
+  unknown (`idleUnknown`), since only a busy reading counts as the turn
+  running. That includes `ErrObservationOutstanding`, which every later
+  check's own reading gets at once while one an earlier check left wedged is
+  still out.
 
 ## Turn sources
 
@@ -102,6 +116,23 @@ end between two reads can fall out of it. `CurrentTurn` scans the transcript's
 last 16 MiB (`sessionlog.ScanTurns`) while `WatchTurns` folds what was appended
 since its last rescan (`sessionlog.TurnFollower`), so the two can disagree
 about a turn that began before that window.
+
+## Keyed deliveries
+
+A request's `DeliveryKey` (`NudgeRequest`, `MessageRequest`) reaches only a
+runtime that deduplicates keyed deliveries (`runtime.KeyedNudgeProvider` at
+the leaf a composite routes to). Default and immediate delivery carry it;
+wait-idle delivery and a message the session queues do not. A `RuntimeHandle`
+reports the runtime's receipt on `NudgeResult.Receipt`.
+
+`Redelivery` says an earlier attempt under the key may have landed. The
+handle looks the delivery up (`runtime.LookupDelivery`,
+`session.Manager.LookupDelivery`) before any effect: for `Message`, before
+`Manager.Submit` and so before any turn sighting or interrupt. A delivery the
+runtime holds is never sent again: the result is `Replayed`, with the held
+receipt on a nudge. A lookup that cannot tell fails the request wrapping
+`runtime.ErrNudgeNotSent`, with nothing sent. A request without `Redelivery`
+looks nothing up.
 
 ## Codex activity
 
