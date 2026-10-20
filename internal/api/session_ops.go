@@ -82,8 +82,8 @@ import (
 // messageSentinels maps the message paths' legacy errors onto op outcomes
 // (DES-O0API §6.3), the API's and the CLI's alike (MessageOpResult). A
 // session whose row or runtime is gone is session_gone. The delivery
-// timeouts of /messages and of a recorded /submit are reported as
-// context.DeadlineExceeded.
+// timeouts of a recorded /messages and of a recorded /submit are reported
+// as context.DeadlineExceeded.
 var messageSentinels = legacyop.Sentinels{
 	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
 	ConversationClosed:  []error{session.ErrSessionClosed},
@@ -92,8 +92,8 @@ var messageSentinels = legacyop.Sentinels{
 	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
 }
 
-// messageTimeoutError is /messages' delivery timeout: the legacy event text,
-// classified as context.DeadlineExceeded for the op outcome.
+// messageTimeoutError is a recorded /messages' delivery timeout: the legacy
+// event text, classified as context.DeadlineExceeded for the op outcome.
 type messageTimeoutError struct{}
 
 // Error is the legacy timeout text.
@@ -228,7 +228,8 @@ func recordAcked(rec events.Recorder, e events.Event) error {
 // city's event log (from's, when the city has no live Server), after the
 // events kept before it. An event the log refuses is kept, to be recorded
 // when the supervisor builds the city's next Server, before the city's next
-// emit, or before a same-key retry of its request is answered.
+// emit, before a same-key retry of its request is answered, or when its
+// request's outcome is looked up (lookupRequestOutcome).
 func (c *cityOps) emit(from *Server, requestID, operation string, e events.Event) {
 	c.emitMu.Lock()
 	defer c.emitMu.Unlock()

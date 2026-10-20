@@ -36,7 +36,17 @@ import (
 // to isolate mutation logic from reads and streaming.
 
 var (
+	// sessionMessageAsyncTimeout bounds a recorded /messages' delivery, as
+	// sessionSubmitAsyncTimeout bounds a recorded /submit's, so the op closes
+	// inside its finish_by. An unrecorded /messages has no op to close and is
+	// not bounded: the delivery's own result is its terminal event.
 	sessionMessageAsyncTimeout = sessionMessageTimeout
+	// sessionMessageSlowDeliveryLogAfter is how long an unrecorded /messages
+	// delivery may run before the API logs that it is still in flight. It
+	// matches the CLI client's wait so the log marks the point where that
+	// client gives up. It never ends the request: the delivery's own result is
+	// the terminal event.
+	sessionMessageSlowDeliveryLogAfter = sessionMessageTimeout
 	// sessionSubmitAsyncTimeout bounds a recorded /submit's delivery. It ends
 	// well inside the op's finish_by, ExecutionBound after admission or
 	// adoption, so the op closes from the delivery's result, or from this
@@ -52,6 +62,28 @@ type sessionCommandableWaiter interface {
 }
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
+	// Idempotency: accept (and create) at most once per Idempotency-Key. A
+	// replay returns the original 202 body — same request_id and event_cursor —
+	// whether the first create is still running or has finished, so a client
+	// that lost the 202 watches the original request instead of creating a
+	// second session.
+	accepted, err := withIdempotency(s.idem, "/v0/sessions", input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedBody, error) {
+			out, err := s.acceptSessionCreate(ctx, input)
+			if err != nil {
+				return asyncAcceptedBody{}, err
+			}
+			return out.Body, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionCreateOutput{Status: http.StatusAccepted, Body: accepted}, nil
+}
+
+// acceptSessionCreate validates the create request, starts the asynchronous
+// create, and returns the 202 response.
+func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -146,17 +178,13 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionCreate)
+	if acceptErr != nil {
+		return nil, acceptErr
 	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
-	}
-
 	go func() {
-		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
+		defer finishRequest()
+		defer s.recoverSessionCreate(reqID)
 		if transport == "acp" {
 			var mcpMetaErr error
 			extraMeta, mcpMetaErr = session.WithStoredMCPMetadata(extraMeta, workDirQualifiedName, mcpServers)
@@ -340,16 +368,13 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		}
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
-	}
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+	reqID, eventCursor, finishRequest, acceptErr := s.acceptAsyncRequest(RequestOperationSessionCreate)
+	if acceptErr != nil {
+		return nil, acceptErr
 	}
 	go func() {
-		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
+		defer finishRequest()
+		defer s.recoverSessionCreate(reqID)
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
@@ -831,8 +856,10 @@ type messageDelivery struct {
 
 // acceptMessageOp is the acceptance /submit and /messages share: it
 // validates req's target, admits req as a message op under the ops.content
-// gate (session_ops.go), starts deliver on its own goroutine and returns the
-// 202 body. A replay is answered with its body and starts nothing.
+// gate (session_ops.go), records the request's acceptance so its request_id
+// resolves through GET /request/{requestId} (request_outcome.go), starts
+// deliver on its own goroutine and returns the 202 body. A replay is answered
+// with its body and starts nothing: its request_id is the one first accepted.
 func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, deliver func(messageDelivery)) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -843,6 +870,12 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 		return asyncAcceptedBody{}, err
 	}
 	req.conv = conv
+	// The acceptance is recorded in the city event log: a city without one
+	// refuses the request before it is admitted.
+	ep, err := s.asyncRequestEventLog()
+	if err != nil {
+		return asyncAcceptedBody{}, err
+	}
 	// The cursor is captured before admission and before the goroutine: a
 	// fast terminal event, or a replay's re-emitted one, lands after it.
 	eventCursor, err := s.currentCityEventCursor()
@@ -862,6 +895,13 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	if err != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
 	}
+	finish, err := s.recordAsyncAcceptance(ep, reqID, req.operation)
+	if err != nil {
+		// Nothing ran: release the admission, leaving a recorded op open as
+		// releaseOnPanic does, so a same-key retry adopts it.
+		adm.Finish(legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonOther}, LeaveOpen: true})
+		return asyncAcceptedBody{}, err
+	}
 	body := acceptedMessageBody(adm, reqID, eventCursor)
 	adm.Accept(inflightAnswer{operation: req.operation, body: body})
 	s.ops.runAfterAdmit()
@@ -875,6 +915,7 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	operation := req.operation
 	handedOff = true
 	go func() {
+		defer finish()
 		defer s.recoverMessageOp(adm, reqID, operation)
 		deliver(d)
 	}()
@@ -1021,11 +1062,30 @@ func awaitSend(d messageDelivery, operation string, timeout time.Duration, timed
 }
 
 // deliverMessage delivers an accepted /messages: it runs the send on its own
-// goroutine under sessionMessageAsyncTimeout, closes the op from the send's
-// result, or from a timeout when the send outlives it, and emits the
-// terminal event.
+// goroutine, under sessionMessageAsyncTimeout when the request is recorded,
+// closes the op from the send's result, or from a timeout when the send
+// outlives it, and emits the terminal event. An unrecorded /messages, like an
+// unrecorded /submit, has no op to close by a finish_by and is not timed out:
+// the API cannot know whether a delivery still in flight will land, so an
+// event it emitted at a deadline would be a guess, and a "failed" guess makes
+// a retry duplicate the message. Its delivery runs to its real outcome, which
+// is the request's one terminal event. Not every provider bounds a delivery (a
+// k8s, herdr or ssh runtime's nudge sets no deadline of its own), so one to a
+// wedged runtime stays pending, with no terminal event, until the runtime
+// answers; a delivery still in flight after sessionMessageSlowDeliveryLogAfter
+// is logged.
 func (s *Server) deliverMessage(d messageDelivery, message string, resume bool) {
-	result := awaitSend(d, RequestOperationSessionMessage, sessionMessageAsyncTimeout, messageTimeoutError{}, func(ctx context.Context, send *messageSend) {
+	var timeout time.Duration
+	if d.adm != nil && d.adm.Recorded {
+		timeout = sessionMessageAsyncTimeout
+	} else {
+		slowAfter := sessionMessageSlowDeliveryLogAfter
+		slow := time.AfterFunc(slowAfter, func() {
+			log.Printf("api: session.message still in flight after %s request_id=%s target=%s; its result event follows when delivery finishes", slowAfter, d.reqID, d.target)
+		})
+		defer slow.Stop()
+	}
+	result := awaitSend(d, RequestOperationSessionMessage, timeout, messageTimeoutError{}, func(ctx context.Context, send *messageSend) {
 		s.sendMessage(ctx, d, send, message, resume)
 	})
 	op := s.finishMessageOp(d.adm, MessageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
@@ -1097,11 +1157,13 @@ func (s *Server) humaHandleSessionStop(ctx context.Context, input *SessionStopIn
 // --- Session Kill ---
 
 // humaHandleSessionKill is the Huma-typed handler for POST /v0/session/{id}/kill.
-
-func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
+// The kill is `gc session kill`'s (Server.operatorKill). force is an
+// execution option outside the request's fingerprint, as --force is outside
+// gc session kill's op digest: a same-key retry of a finished kill replays it.
+func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionKillInput) (*OKWithIDResponse, error) {
 	answer, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "kill"), input.IdempotencyKey, sessionControlNoBody{},
 		func() (syncAnswer, error) {
-			return s.killSession(input.ID, input.IdempotencyKey)
+			return s.killSession(input.ID, input.IdempotencyKey, input.Force)
 		})
 	if err != nil {
 		return nil, err
@@ -1111,7 +1173,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionControlI
 
 // killSession kills target's runtime, recorded as a kill op under
 // ops.lifecycle, and returns the answer.
-func (s *Server) killSession(target, key string) (syncAnswer, error) {
+func (s *Server) killSession(target, key string, force bool) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -1122,37 +1184,17 @@ func (s *Server) killSession(target, key string) (syncAnswer, error) {
 		return syncAnswer{}, humaResolveError(err)
 	}
 
-	// Under the kill fence, as `gc session kill`: without it the controller
-	// reads the kill as a crash (heal, accrual, a same-pass restart). A
-	// recorded kill stops only the generation its op is scoped to: the check
-	// runs under the runtime lease (a closed row's included), taken first and
-	// lent to the fence, and before the fence does anything, so a refused kill
-	// leaves the row as it found it.
-	mgr := s.sessionManager(store.Store)
 	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		ctx := context.Background()
-		by := s.actor(session.ActorOperator)
-		lease, err := s.recordedKillLease(ctx, store.Store, id, by, adm)
-		if err != nil {
-			return syncOpResult(opjournal.KindKill, err, adm.Minted), humaSessionManagerError(err)
+		killed, err := s.operatorKill(context.Background(), store.Store, id, force, adm)
+		res := killOpResult(err, adm.Minted)
+		if killed.AlreadyInactive {
+			// A named session's runtime was already gone: nothing was killed.
+			res = legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}}
 		}
-		if lease != nil {
-			// A fenced kill ends a lent lease itself; Release is then a no-op.
-			// It runs before the op closes, so no op write runs under it.
-			defer lease.Release()
-			by.Lease = lease
-		}
-		if err := killScopeMoved(store.Store, id, adm); err != nil {
-			if errors.Is(err, errKillTargetMoved) {
-				return killOpResult(err, adm.Minted), apierr.SessionConflict.Msg(err.Error())
-			}
-			return killOpResult(err, adm.Minted), humaSessionManagerError(err)
-		}
-		err = mgr.KillFenced(ctx, by, id, func(ctx context.Context, by session.Actor) error {
-			return mgr.Kill(ctx, by, id)
-		})
-		res := syncOpResult(opjournal.KindKill, err, adm.Minted)
-		if err != nil && !errors.Is(err, session.ErrSessionClosed) && !errors.Is(err, session.ErrSessionInactive) {
+		switch {
+		case errors.Is(err, errKillTargetMoved):
+			return res, apierr.SessionConflict.Msg(err.Error())
+		case err != nil && !errors.Is(err, session.ErrSessionClosed) && !errors.Is(err, session.ErrSessionInactive):
 			return res, humaSessionManagerError(err)
 		}
 		// A closed session, or one whose runtime is already gone, is already

@@ -314,6 +314,29 @@ func TestSessionControlOpsKillOfAnInactiveSessionReplays(t *testing.T) {
 	}
 }
 
+// A kill of a configured named session whose runtime is already gone counts
+// as done, as gc session kill's does, and closes skipped{not_needed}, as an
+// unnamed session's kill does.
+func TestSessionControlOpsKillOfAnInactiveNamedSessionSkips(t *testing.T) {
+	e := newControlOpsEnv(t, "off", "auto")
+	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
+	info := e.session(t, "Gone named")
+	if err := e.store.SetMetadata(info.ID, session.NamedSessionIdentityMetadata, "helper"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.fs.sp.Stop(info.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.SetMetadata(info.ID, "state", "asleep"); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
+	wantStatus(t, "kill", rec, http.StatusOK)
+	if a := decodeCommandAnswer(t, rec); a.Op == nil || a.Op.Outcome == nil || a.Op.Outcome.Arm != string(opjournal.ArmSkipped) || a.Op.Outcome.Reason != opjournal.ReasonNotNeeded {
+		t.Fatalf("kill op = %+v, want it closed skipped{not_needed}", a.Op)
+	}
+}
+
 // A same-key kill after the session moved to a later generation answers from
 // the first kill instead of refusing the key as another request.
 func TestSessionControlOpsKillRetryAfterARestartedSessionReplays(t *testing.T) {
@@ -1897,12 +1920,13 @@ func TestSessionControlOpsAdoptedKillOfAMovedSessionIsRefused(t *testing.T) {
 	}
 }
 
-// reopenAtFenceStore reopens closed session id, and starts a new run of it, at
-// the kill fence's first read of the row: a reopen and a start that land
-// between a recorded kill's generation check and its fence. The start takes
-// the session's runtime lease, as every start does; startErr is the lease's
+// reopenAtKillStore reopens closed session id, and starts a new run of it, at
+// the kill's first read of the row (session.Manager.Kill: the operator kill
+// of a closed row runs no fence): a reopen and a start that land between a
+// recorded kill's generation check and its kill. The start takes the
+// session's runtime lease, as every start does; startErr is the lease's
 // answer, and a start the lease refuses does nothing.
-type reopenAtFenceStore struct {
+type reopenAtKillStore struct {
 	*opsTestStore
 	id, city, name string
 	sp             *runtime.Fake
@@ -1910,14 +1934,14 @@ type reopenAtFenceStore struct {
 	startErr       error
 }
 
-func (s *reopenAtFenceStore) Get(id string) (beads.Bead, error) {
-	if id == s.id && callStackHas("session.(*Manager).KillFencedReport") && s.fired.CompareAndSwap(false, true) {
+func (s *reopenAtKillStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && callStackHasFunc("session.(*Manager).Kill") && s.fired.CompareAndSwap(false, true) {
 		s.startErr = s.reopenAndStart()
 	}
 	return s.opsTestStore.Get(id)
 }
 
-func (s *reopenAtFenceStore) reopenAndStart() error {
+func (s *reopenAtKillStore) reopenAndStart() error {
 	if err := s.Reopen(s.id); err != nil {
 		return err
 	}
@@ -1937,7 +1961,7 @@ func (s *reopenAtFenceStore) reopenAndStart() error {
 }
 
 // A recorded kill of a closed row holds the session's runtime lease from its
-// generation check through the fence, as on an open row: a reopen and a start
+// generation check through the kill, as on an open row: a reopen and a start
 // that land in between find the lease held, so the start waits out the kill
 // instead of making a run the kill then stops.
 func TestSessionControlOpsKillOfAClosedRowHoldsTheLease(t *testing.T) {
@@ -1950,17 +1974,17 @@ func TestSessionControlOpsKillOfAClosedRowHoldsTheLease(t *testing.T) {
 	if err := e.store.Close(info.ID); err != nil {
 		t.Fatal(err)
 	}
-	reopening := &reopenAtFenceStore{opsTestStore: e.store, id: info.ID, city: e.fs.cityPath, name: info.SessionName, sp: e.fs.sp}
+	reopening := &reopenAtKillStore{opsTestStore: e.store, id: info.ID, city: e.fs.cityPath, name: info.SessionName, sp: e.fs.sp}
 	e.fs.cityBeadStore = reopening
 	e.restart(t)
 	starts := e.fs.sp.CountCalls("Start", info.SessionName)
 	rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
 	wantStatus(t, "kill", rec, http.StatusOK)
 	if !reopening.fired.Load() {
-		t.Fatal("the fence never read the row")
+		t.Fatal("the kill never read the row")
 	}
 	if !errors.Is(reopening.startErr, session.ErrRuntimeLeaseBusy) {
-		t.Fatalf("the start between the generation check and the fence: %v; want the runtime lease busy, held by the kill", reopening.startErr)
+		t.Fatalf("the start between the generation check and the kill: %v; want the runtime lease busy, held by the kill", reopening.startErr)
 	}
 	if got := e.fs.sp.CountCalls("Start", info.SessionName); got != starts || e.fs.sp.IsRunning(info.SessionName) {
 		t.Fatalf("a run started under the kill: %d Start calls, running %v", got-starts, e.fs.sp.IsRunning(info.SessionName))
@@ -2086,6 +2110,23 @@ func (s *frameFailingStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, s.err
 	}
 	return s.opsTestStore.Get(id)
+}
+
+// callStackHasFunc reports whether a caller is the function whose name ends
+// in fn: unlike callStackHas, "session.(*Manager).Kill" names Kill alone, not
+// KillFencedReport or KillRuntimeGone.
+func callStackHasFunc(fn string) bool {
+	pcs := make([]uintptr, 64)
+	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
 }
 
 // callStackHas reports whether a caller's function name contains frame.

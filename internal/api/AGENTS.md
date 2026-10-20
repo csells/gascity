@@ -118,22 +118,25 @@ registry, the degrade reporter, the kept terminal events and the city's live
 replaces, so a same-key retry still finds a replaced `Server`'s running
 delivery, and that delivery a live `Server` to report through.
 
-In every `ops.content` mode, `off` included, a delivery records its terminal
-event to the city's live `Server`'s event log (`emitMessageResult`), and a
-recorded one closes its op through that `Server`'s store (`openOpStore`); its
-own `Server` serves only when the city has no live `Server` (the supervisor
-dropped it). An event the log refuses is kept, in order, and recorded when the
-supervisor publishes the city's next `Server`, before the city's next terminal
-event, and before a same-key retry of its request is answered. Three points
-answer such a retry: the `Idempotency-Key` LRU (`withMessageIdempotency`), the
-in-flight registry and the stored op (`replayAnswer`). Each records the kept
-events first and answers 409 `in_flight` while the retry's event stays kept,
-so no 202 goes out without its terminal event after its cursor. A new answer
-point must do the same. The stored op's replay then re-emits its event unless
-the log just took a kept one of its request, endpoint and type, which is after
-its cursor too (`cityOps.emitReplay`); one for the other endpoint, whose
-waiter would never match it, does not stand in for it.
-`engdocs/design/async-request-result.md` rules 8 and 9 are the client
+In every `ops.content` mode, `off` included, a delivery, and a session create,
+records its terminal event to the city's live `Server`'s event log
+(`emitSessionRequestResult`), and a recorded delivery closes its op through
+that `Server`'s store (`openOpStore`); its own `Server` serves only when the
+city has no live `Server` (the supervisor dropped it). An event the log
+refuses is kept, in order, and recorded when the supervisor publishes the
+city's next `Server`, before the city's next terminal event, and before a
+same-key retry of its request is answered. Three points answer such a retry:
+the `Idempotency-Key` LRU (`withMessageIdempotency`), the in-flight registry
+and the stored op (`replayAnswer`). Each records the kept events first and
+answers 409 `in_flight` while the retry's event stays kept, so no 202 goes out
+without its terminal event after its cursor. A new answer point must do the
+same. The outcome lookup (`lookupRequestOutcome`) records the kept events too
+before it answers `outcome_unknown`, and answers `pending` while the request's
+event stays kept: a kept outcome is held, not lost. The stored op's replay
+then re-emits its event unless the log just took a kept one of its request,
+endpoint and type, which is after its cursor too (`cityOps.emitReplay`); one
+for the other endpoint, whose waiter would never match it, does not stand in
+for it. `engdocs/design/async-request-result.md` rules 8 and 9 are the client
 contract.
 
 The city's terminal events serialize on one lock, `cityOps.emitMu`, held
@@ -149,8 +152,8 @@ under it.
 
 A recorded delivery ends, through its own timeout, inside its op's
 `finish_by`, `legacyop.ExecutionBound` after its admission or adoption:
-`/messages` at `sessionMessageAsyncTimeout`, a recorded `/submit` at
-`sessionSubmitAsyncTimeout` (`TestMessageDeliveryTimeoutsEndInsideFinishBy`).
+a recorded `/messages` at `sessionMessageAsyncTimeout`, a recorded `/submit`
+at `sessionSubmitAsyncTimeout` (`TestMessageDeliveryTimeoutsEndInsideFinishBy`).
 It closes its op from its result, or `failed{deadline_in_flight}` from the
 timeout, with time left for that close to land. That time is a fixed margin,
 `ExecutionBound` less the delivery's timeout (five minutes for `/submit`,
@@ -197,13 +200,16 @@ That holds only as far as request IDs tell prompts apart: where the runtime
 derives them from the prompt's content (tmux hashes the tool and its input),
 an identical prompt raised again carries the first one's ID and is answered
 too, until OJ-16 keys respond ops by the interaction occurrence. A
-recorded kill takes the runtime lease first (`recordedKillLease`; on a
-closed row, which keeps no lease record, the runtime name's flock alone),
-checks its op's generation under it, and only then lends the lease to
-`KillFenced`: a kill whose generation is gone refuses
-`refused:target_moved` before the fence, the stop or the asleep sync touches
-anything, and a row that does not read is a retryable error, nothing killed.
-Unlike the API, `gc session kill` takes no lease on a closed row. A
+recorded kill is `gc session kill`'s operator kill (`worker.OperatorKill`,
+through `Server.operatorKill`): it takes the runtime lease first (an open
+row's as `gc session kill` does, `session.KillRuntimeLease`; a closed row's,
+which keeps no lease record, the runtime name's flock alone,
+`recordedKillLease`), checks its op's generation under it
+(`OperatorKillRequest.Check`), and only then lends the lease to the fenced
+kill: a kill whose generation is gone refuses `refused:target_moved` before
+the fence, the stop or the asleep sync touches anything, and a row that does
+not read is a retryable error, nothing killed. Unlike the API,
+`gc session kill` takes no lease on a closed row. A
 `/close?delete=true` op carries `{"delete":true}` as its payload
 (`closeOpRequest`; a plain close carries none, as `gc session close`'s op
 does), so the op's digest covers the delete: reusing a key across `/close`

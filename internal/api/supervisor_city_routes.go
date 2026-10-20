@@ -384,13 +384,18 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/sessions",
 		Summary:       "Create a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a same-key retry while the first create is still being accepted.
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionCreate)
 	// 400: invalid pagination cursor (invalid-cursor problem type).
 	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest sessions first"))
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/turn", (*Server).humaHandleSessionTurn, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Reads the session's turn identity, read-only: where its turns are read from (source), how far that answer can be trusted (capabilities), and what one read saw now (observation, current, recent). "+
+			"A session whose turns cannot be identified answers 200 with source none and observation unsupported, never a 5xx; a source that cannot be read now answers 200 with observation unavailable, meaning its turns are unknown, not idle. "+
+			"An open session that no runtime is bound to runs no turn: it answers observed with no current turn, as POST /session/{id}/stop reads it. A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop interrupts the turn its turn field names, or whatever turn is current when it names none."))
 	cityGet(sm, "/pending", (*Server).humaHandleCityPending, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
@@ -410,12 +415,28 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
+	cityRegister(sm, huma.Operation{
+		OperationID: "get-request-outcome",
+		Method:      http.MethodGet,
+		Path:        "/request/{requestId}",
+		Summary:     "Get the outcome of an async session request",
+		Description: "Reads the outcome of a session create, message or submit request by the request_id its 202 returned, " +
+			"so a client that missed the request.result.* or request.failed event (a dropped stream, a supervisor restart) can still learn it. " +
+			"after_seq is the event_cursor of the same 202: the outcome is derived from the persisted city event log after it, so it survives a supervisor restart and lasts as long as the log retains the request's events. " +
+			"pending means the request is still running, or its terminal event is held until the log takes it; succeeded and failed carry the terminal event exactly as the event stream delivered it; " +
+			"outcome_unknown means the server that accepted the request stopped before recording an outcome, so the operation may or may not have taken effect. " +
+			"An id this city did not accept after after_seq, or whose events have aged out of the log, is a 404 request-not-found.",
+		Errors: []int{http.StatusNotFound, http.StatusServiceUnavailable},
+	}, (*Server).humaHandleRequestOutcome)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable),
 		describes("Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. "+
 			"For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. "+
 			"An interrupt_now submit interrupts the turn the same way but leaves background terminals running. "+
 			"A runtime that can interrupt the turn neither by keys nor by protocol gets nothing sent and answers 501 turn_interrupt_unsupported."))
-	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Force-kills the session's runtime without discarding its work, as `gc session kill` does: the session is left asleep with sleep_reason killed, a configured named session's respawn circuit breaker is cleared, the controller is asked to reconcile the session, and session.stopped and worker.operation are recorded. "+
+			"A closed session, or one whose runtime is already gone, reports ok. "+
+			"409 live_subagents refuses a kill that would destroy live background subagents and names them; force overrides it. 409 session_starting is retryable: another holder has the runtime lease."))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. "+
 			"The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. "+
