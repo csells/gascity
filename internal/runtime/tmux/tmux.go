@@ -266,6 +266,13 @@ var (
 	// been delivered, so a caller that must not deliver twice treats it as
 	// possibly delivered.
 	ErrNudgeSubmitUnconfirmed = fmt.Errorf("%w: submit Enter delivered to tmux but not confirmed (busy state never observed)", runtime.ErrNudgeDeliveryUnconfirmed)
+	// errNudgeSubmitHeld means a nudge typed its message but a running turn
+	// held its interrupting submit back for the whole confirm window, and
+	// the typed message could not be cleared: it sits in the composer,
+	// unsubmitted. No submit was sent, so it is not ErrNudgeSubmitUnconfirmed,
+	// and something typed is left, so it is not runtime.ErrSessionBusy.
+	// Callers count the attempt as failed.
+	errNudgeSubmitHeld = errors.New("nudge typed but its submit was held back and the typed message was not cleared")
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -3328,6 +3335,9 @@ func (g *nudgePromptGuard) refused(err error) error {
 // startup nudge does not take that wait (the start's own readiness wait
 // precedes it); like every nudge, it still never sends an interrupting
 // submit into a turn its confirm loop sees running (see submitAndConfirm).
+// A message whose submit that loop held back for its whole window is cleared
+// from the composer, and the nudge defers with runtime.ErrSessionBusy as well
+// (see clearHeldDraft).
 func (t *Tmux) nudgeSession(
 	ctx context.Context,
 	session, message string,
@@ -3531,11 +3541,21 @@ func (t *Tmux) nudgeSession(
 		if sent == 0 {
 			// Every round found a turn running (or no message waiting), so the
 			// interrupting submit was never sent: the message sits typed in
-			// the composer, undelivered, and the next delivery's clear
-			// replaces it. Busy, so a deferring caller queues it; unconfirmed,
-			// so a retrying caller (the startup ladder) re-runs the delivery.
-			return fmt.Errorf("%w: %w: session %q: a turn was running when the message was ready to submit, so its submit keys (%s) were held back; the message is typed but not submitted",
-				runtime.ErrSessionBusy, ErrNudgeSubmitUnconfirmed, session, strings.Join(submitKeys, " "))
+			// the composer, undelivered. It is gc's own draft, so it is
+			// cleared even with a client attached, and the nudge is then
+			// deferred like one that typed nothing (runtime.ErrSessionBusy):
+			// a deferring caller queues it, and the startup ladder re-runs it.
+			// A draft that will not clear is still typed, so that nudge is
+			// neither a deferral nor a submit in doubt (errNudgeSubmitHeld).
+			// The clear's error is kept in the text only: a sentinel it
+			// carries (a permission prompt, a pane gone) would tell a caller
+			// that nothing was typed.
+			if err := t.clearHeldDraft(ctx, target, prompt.check); err != nil {
+				return fmt.Errorf("%w: session %q: a turn held its submit keys (%s) back, and clearing the typed message failed: %s",
+					errNudgeSubmitHeld, session, strings.Join(submitKeys, " "), err.Error())
+			}
+			return fmt.Errorf("%w: session %q: a turn was running when the message was ready to submit, so its submit keys (%s) were held back and the typed message was cleared",
+				runtime.ErrSessionBusy, session, strings.Join(submitKeys, " "))
 		}
 		delivered = true
 		if !confirmed {
@@ -5460,8 +5480,11 @@ func waitForIdlePoll(ctx context.Context) error {
 	}
 }
 
-// WaitForInterruptBoundary waits for a provider-native interrupt
-// acknowledgement before the next user turn is injected.
+// WaitForInterruptBoundary waits, before the next user turn is injected,
+// until the turn an interrupt sent at since was stopping has ended. For Codex
+// that is the session's own rollout recording no running turn
+// (waitForCodexInterruptBoundary), which a session interrupted between turns
+// does at once.
 func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
 	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
 	switch strings.TrimSpace(provider) {
@@ -5485,13 +5508,23 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 	return waitForCodexInterruptBoundary(ctx, rollout, since, timeout)
 }
 
-// waitForCodexInterruptBoundary waits until the Codex rollout at path,
-// written since since, records the interrupted turn's turn_aborted marker.
+// waitForCodexInterruptBoundary waits until the Codex rollout at path records
+// no running turn (codexRolloutRecordsNoRunningTurn): the interrupted turn
+// ended, whether the interrupt aborted it or it completed before the interrupt
+// landed. Codex records nothing when an interrupt reaches it between turns, so
+// a session that was running no turn reads that way at once and the wait
+// returns at once. Where the rollout cannot tell (it records no lifecycle
+// event, ends in a torn row, or its latest turn start lies beyond the
+// lifecycle scan), the rollout written since since recording the interrupted
+// turn's turn_aborted marker ends the wait.
 func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.Time, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if codexRolloutRecordsNoRunningTurn(path) {
+			return nil
 		}
 		if info, err := os.Stat(path); err == nil && !info.ModTime().Before(since) {
 			tail, err := readFileTail(path, codexInterruptBoundaryTailBytes)
@@ -5504,6 +5537,16 @@ func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.
 		}
 	}
 	return ErrIdleTimeout
+}
+
+// codexRolloutRecordsNoRunningTurn reports whether the Codex rollout at path
+// records its latest turn start as ended, read from its lifecycle events as
+// the session's activity is (sessionlog.ExtractCodexTailMeta reads idle). A
+// rollout whose activity cannot be told, or that cannot be read, reports
+// false.
+func codexRolloutRecordsNoRunningTurn(path string) bool {
+	meta, err := sessionlog.ExtractCodexTailMeta(path)
+	return err == nil && meta != nil && meta.Activity == "idle"
 }
 
 func readFileTail(path string, maxBytes int64) (_ string, err error) {

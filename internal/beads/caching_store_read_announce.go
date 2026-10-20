@@ -29,6 +29,11 @@ import (
 // differences would turn every alternating list/Get into an update flood. The
 // announcement carries the row as installed, through the same ChangeRefresh
 // source as RefreshRow, so a consumer treats it as the read inference it is.
+//
+// Reads overlap, and the one that answers last may have read first. Every
+// install that changed what a consumer reads is therefore stamped
+// (fenceReadInstallLocked), so a read begun before it installs, and so
+// announces, nothing: announcements for a row never move backwards.
 
 // readAbsorbChanged reports whether installed differs from previous in a field
 // a bead.* consumer reads for lifecycle: status, assignee or metadata.
@@ -67,6 +72,28 @@ func (c *CachingStore) trackReadUpdateLocked(id string, previous Bead, hadPrevio
 	}
 	c.unannouncedUpdates[id] = cloneBead(installed)
 	c.hasUnannouncedUpdates.Store(true)
+}
+
+// fenceReadInstallLocked stamps id (noteMutationLocked) after a read install
+// (announce) that changed what the cache holds for it in the fields a
+// bead.* consumer reads: a row the cache did not hold, or a held row whose
+// status, assignee or metadata changed (readAbsorbChanged). Two backing reads
+// of one row are unordered: without a stamp, a read that began before the
+// install, and may have read an older row, looks no different from one that
+// began after it, so it would install its row over the newer one and queue it
+// as a change, announcing a claimed or closed row unclaimed or running
+// again. The stamp refuses every refetch, list refresh and scan that
+// began before the install (refetchFencedLocked, the reconcile's
+// fencedAfterSnapshot), as RefreshRow's stamp of a changed row does. An
+// install that changed nothing a consumer reads is not stamped, so a list row
+// and a point read that carry other fields differently do not move the
+// mutation sequence on every read. Caller must hold c.mu in write mode, after
+// the install cleared the fences its seqMode clears.
+func (c *CachingStore) fenceReadInstallLocked(id string, previous Bead, hadPrevious bool, installed Bead, announce bool) {
+	if !announce || (hadPrevious && !readAbsorbChanged(previous, installed)) {
+		return
+	}
+	c.noteMutationLocked(id)
 }
 
 // dropQueuedUpdateLocked removes id's queued update. Caller must hold c.mu in

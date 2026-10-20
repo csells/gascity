@@ -352,11 +352,17 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     set, empty on such a backing, so until a later scan reads the edges a
 //     census can show a row without an edge a settled dependency write added.
 //   - A scan can roll a refetch back. Get, the overlay and a Live or Parent
-//     list clear or skip a row's beadSeq when they install it (RefreshRow
-//     stamps a changed row), so a reconcile whose listing predates the
-//     install, or a full Prime replace or PrimeActive that no mutation
-//     followed, installs its older row over it. It covers no local write
-//     (not a C5.4 breach) and lasts until the next scan.
+//     list clear or skip a row's beadSeq when they install it, except that
+//     an install that put a row the cache did not hold, or changed a held
+//     row's status, assignee or metadata, is stamped, as RefreshRow stamps a
+//     changed row (fenceReadInstallLocked). A reconcile whose listing
+//     predates an unstamped install, or a full Prime replace or PrimeActive
+//     that no mutation followed, installs its older row over it. It covers
+//     no local write (not a C5.4 breach) and lasts until the next scan.
+//   - Two refetches of one row cannot be ordered. A refetch that began
+//     before another's stamped install is refused, though its backing read
+//     may be the newer one: the cache keeps the stamped row until a read that
+//     begins after the stamp, or the next scan, installs the newer one.
 //   - An uncached event installs only its backing read, so a new row whose
 //     read fails or lags at event time waits for the next reconcile to
 //     appear.
@@ -957,7 +963,9 @@ type absorbOpts struct {
 	// announceRead marks an install by a read that refetched the row from the
 	// backing (a live list, a dirty-row Get, the dirty overlay): a change it
 	// installs over a held open row is queued for a bead.updated announcement
-	// (see unannouncedUpdates). Writes, reconcile diffs and applied events
+	// (see unannouncedUpdates), and an install that changed what a consumer
+	// reads is stamped so no read begun before it installs an older row over
+	// it (fenceReadInstallLocked). Writes, reconcile diffs and applied events
 	// announce for themselves or came from the bus, and leave it false.
 	announceRead bool
 	// closeClaimed says the caller is a closing write of this cache that
@@ -1019,6 +1027,7 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	case seqClearBeadSeqOnly:
 		delete(c.beadSeq, id)
 	}
+	c.fenceReadInstallLocked(id, previous, hadPrevious, bead, opts.announceRead)
 }
 
 // absorbReadyProjectionLocked decides what happens to a row's is_blocked

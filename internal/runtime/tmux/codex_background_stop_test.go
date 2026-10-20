@@ -421,6 +421,57 @@ func TestOtherProvidersStopBackgroundWorkIsUnsupported(t *testing.T) {
 // codexAbortedRow is the rollout row Codex writes when an interrupt lands.
 const codexAbortedRow = `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n"
 
+// codexLifecycleRow is the rollout row Codex writes for a turn's lifecycle
+// event: kind is task_started, task_complete or turn_aborted.
+func codexLifecycleRow(kind, turnID string) string {
+	return `{"timestamp":"2026-10-16T02:43:26.424Z","type":"event_msg","payload":{"type":"` + kind + `","turn_id":"` + turnID + `"}}` + "\n"
+}
+
+// codexTurnAbortedRows are the rows codex-cli 0.162.1 writes when an
+// interrupt aborts turnID: a <turn_aborted> developer message, then the
+// turn_aborted event.
+func codexTurnAbortedRows(turnID string) []string {
+	return []string{
+		`{"timestamp":"2026-10-16T02:43:26.418Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<turn_aborted>\nThe previous turn was interrupted on purpose.\n</turn_aborted>"}]}}` + "\n",
+		codexLifecycleRow("turn_aborted", turnID),
+	}
+}
+
+// writeCodexRollout replaces the rollout at path with rows, last written at
+// modTime.
+func writeCodexRollout(t *testing.T, path string, modTime time.Time, rows ...string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(strings.Join(rows, "")), 0o644); err != nil {
+		t.Fatalf("writing rollout: %v", err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("stamping rollout: %v", err)
+	}
+}
+
+// appendCodexRollout appends rows to the rollout at path, as Codex records
+// them now.
+func appendCodexRollout(t *testing.T, path string, rows ...string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("opening rollout: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(strings.Join(rows, "")); err != nil {
+		t.Fatalf("writing rollout: %v", err)
+	}
+	// Stamp the write time explicitly. Linux filesystems take file times from
+	// the kernel's coarse clock, which can trail time.Now() by a few
+	// milliseconds, so a write made microseconds after the interrupt began can
+	// read as older than it. Real Codex writes these rows long after GC's
+	// interrupt keys, well clear of that granularity.
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatalf("stamping rollout: %v", err)
+	}
+}
+
 // TestCodexInterruptBoundaryReadsTheSessionsOwnRollout: Codex sessions
 // commonly share one home (~/.codex, no CODEX_HOME), so the newest rollout
 // there can be another session's. The boundary an interrupt_now submit waits
@@ -471,6 +522,71 @@ func TestCodexInterruptBoundaryWithoutItsOwnRolloutIsUnsupported(t *testing.T) {
 
 	if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-g", time.Now().Add(-time.Minute), time.Minute); !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		t.Fatalf("WaitForInterruptBoundary = %v, want runtime.ErrInteractionUnsupported", err)
+	}
+}
+
+// TestCodexInterruptBoundaryWaitsOnlyForARunningTurn: the boundary an
+// interrupt waits for is the end of the turn it interrupted. An idle Codex
+// records nothing when Escape reaches it, so a session whose own rollout
+// records no running turn has already reached the boundary: the wait returns
+// at once, rather than timing out and failing the stop or restarting the
+// session under an interrupt_now. A running turn is waited for until the
+// rollout records its end, whether the interrupt aborted it or it completed
+// before the interrupt landed.
+func TestCodexInterruptBoundaryWaitsOnlyForARunningTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// rollout is the session's rollout when the interrupt is sent, last
+		// written an hour before.
+		rollout []string
+		// ended is what Codex records after the interrupt; nil when no turn
+		// was running, so Codex records nothing.
+		ended []string
+	}{
+		{
+			name:    "idle after a completed turn",
+			rollout: []string{codexLifecycleRow("task_started", "t1"), codexLifecycleRow("task_complete", "t1")},
+		},
+		{
+			name:    "idle after an earlier interrupt",
+			rollout: append([]string{codexLifecycleRow("task_started", "t1")}, codexTurnAbortedRows("t1")...),
+		},
+		{
+			name:    "a running turn the interrupt aborts",
+			rollout: []string{codexLifecycleRow("task_started", "t1")},
+			ended:   codexTurnAbortedRows("t1"),
+		},
+		{
+			name:    "a running turn that completes before the interrupt lands",
+			rollout: []string{codexLifecycleRow("task_started", "t1")},
+			ended:   []string{codexLifecycleRow("task_complete", "t1")},
+		},
+		{
+			name:    "a later turn running after an earlier one ended",
+			rollout: []string{codexLifecycleRow("task_started", "t1"), codexLifecycleRow("task_complete", "t1"), codexLifecycleRow("task_started", "t2")},
+			ended:   codexTurnAbortedRows("t2"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pane := newFakeCodexPane(t)
+			writeCodexRollout(t, pane.rollout, time.Now().Add(-time.Hour), tc.rollout...)
+			tm := newCodexStopTmux(pane)
+			since := time.Now()
+
+			if tc.ended == nil {
+				if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-h", since, 2*time.Second); err != nil {
+					t.Fatalf("WaitForInterruptBoundary = %v, want nil at once: no turn was running, so there is no turn end to wait for", err)
+				}
+				return
+			}
+			if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-h", since, 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+				t.Fatalf("WaitForInterruptBoundary = %v, want ErrIdleTimeout while the turn still runs", err)
+			}
+			appendCodexRollout(t, pane.rollout, tc.ended...)
+			if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-h", since, time.Second); err != nil {
+				t.Fatalf("WaitForInterruptBoundary = %v, want nil once the rollout records the turn's end", err)
+			}
+		})
 	}
 }
 

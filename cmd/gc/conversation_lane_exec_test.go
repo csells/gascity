@@ -441,6 +441,8 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		{name: "tmux re-send failed after a submit", err: fmt.Errorf("failed to send submit sequence: %w", fmt.Errorf("%w: re-send failed: %w", tmux.ErrNudgeSubmitUnconfirmed, someErr)), wantUnknwn: true},
 		{name: "server lost after fenced input", err: fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed, fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable)), wantUnknwn: true},
 		{name: "not sent", err: fmt.Errorf("%w: nudge lock timeout for session %q", runtime.ErrNudgeNotSent, "s"), transient: true},
+		{name: "deferred while a turn runs", err: fmt.Errorf("sending message to session: %w: session %q is still running a turn", runtime.ErrSessionBusy, "s"), transient: true},
+		{name: "steer deferred while a turn runs", err: fmt.Errorf("sending message to session: %w: session %q is still running a turn", runtime.ErrSessionBusy, "s"), steer: true, transient: true},
 		{name: "anything else may have delivered", err: someErr, wantUnknwn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

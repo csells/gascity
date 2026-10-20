@@ -2,8 +2,8 @@ package tmux
 
 import (
 	"context"
-	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,16 +22,18 @@ type codexPaneSessionProvider struct {
 	tp   *Provider
 	pane *fakeCodexPane
 	t    *testing.T
+	// turn is the turn the pane's Codex is running, "" while it is idle.
+	turn string
 }
 
-// SendKeys reaches the pane; an Escape or Ctrl-C aborts the turn, which Codex
-// records in its rollout.
+// SendKeys reaches the pane; an Escape or Ctrl-C aborts the running turn
+// (abortTurn).
 func (p *codexPaneSessionProvider) SendKeys(name string, keys ...string) error {
 	if err := p.tp.SendKeys(name, keys...); err != nil {
 		return err
 	}
 	if slices.Contains(keys, "Escape") || slices.Contains(keys, "C-c") {
-		p.recordTurnAborted()
+		p.abortTurn()
 	}
 	return nil
 }
@@ -40,32 +42,20 @@ func (p *codexPaneSessionProvider) Interrupt(name string) error {
 	if err := p.tp.Interrupt(name); err != nil {
 		return err
 	}
-	p.recordTurnAborted()
+	p.abortTurn()
 	return nil
 }
 
-// recordTurnAborted appends Codex's turn_aborted marker to the rollout, as
-// Codex does when an interrupt lands.
-func (p *codexPaneSessionProvider) recordTurnAborted() {
+// abortTurn records the running turn aborted in the rollout, as Codex does
+// when an interrupt lands. An idle Codex has no turn to abort and records
+// nothing.
+func (p *codexPaneSessionProvider) abortTurn() {
 	p.t.Helper()
-	rollout := p.pane.rollout
-	f, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		p.t.Fatalf("opening rollout: %v", err)
+	if p.turn == "" {
+		return
 	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n"); err != nil {
-		p.t.Fatalf("writing rollout: %v", err)
-	}
-	// Stamp the write time explicitly. Linux filesystems take file times from
-	// the kernel's coarse clock, which can trail time.Now() by a few
-	// milliseconds, so a write made microseconds after the interrupt began can
-	// read as older than it. Real Codex writes this marker long after GC's
-	// interrupt keys, well clear of that granularity.
-	now := time.Now()
-	if err := os.Chtimes(rollout, now, now); err != nil {
-		p.t.Fatalf("stamping rollout: %v", err)
-	}
+	appendCodexRollout(p.t, p.pane.rollout, codexTurnAbortedRows(p.turn)...)
+	p.turn = ""
 }
 
 func (p *codexPaneSessionProvider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
@@ -84,11 +74,26 @@ func (p *codexPaneSessionProvider) StopBackgroundWork(ctx context.Context, name 
 }
 
 // newCodexPaneSession creates a Codex session whose pane is the live
-// interrupted pane with one background terminal running.
+// interrupted pane with one background terminal running, while its Codex runs
+// a turn.
 func newCodexPaneSession(t *testing.T) (*session.Manager, session.Info, session.Actor, *fakeCodexPane) {
 	t.Helper()
+	mgr, info, by, sp := newCodexPaneSessionRunning(t, "turn-1")
+	return mgr, info, by, sp.pane
+}
+
+// newCodexPaneSessionRunning is newCodexPaneSession with its Codex running
+// turn: the rollout records the turn's start and no end. With turn "" Codex
+// is idle, its last turn completed a minute before.
+func newCodexPaneSessionRunning(t *testing.T, turn string) (*session.Manager, session.Info, session.Actor, *codexPaneSessionProvider) {
+	t.Helper()
 	pane := newFakeCodexPane(t)
-	sp := &codexPaneSessionProvider{Fake: runtime.NewFake(), tp: &Provider{tm: newCodexStopTmux(pane)}, pane: pane, t: t}
+	sp := &codexPaneSessionProvider{Fake: runtime.NewFake(), tp: &Provider{tm: newCodexStopTmux(pane)}, pane: pane, t: t, turn: turn}
+	rollout := []string{codexLifecycleRow("task_started", "turn-0"), codexLifecycleRow("task_complete", "turn-0")}
+	if turn != "" {
+		rollout = []string{codexLifecycleRow("task_started", turn)}
+	}
+	writeCodexRollout(t, pane.rollout, time.Now().Add(-time.Minute), rollout...)
 	cityPath := t.TempDir()
 	mgr := session.NewManagerWithOptions(beads.NewMemStore(), sp, session.WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -99,7 +104,7 @@ func newCodexPaneSession(t *testing.T) (*session.Manager, session.Info, session.
 	if err != nil {
 		t.Fatalf("NewCityDir: %v", err)
 	}
-	return mgr, info, session.Actor{Kind: session.ActorOperator, City: city}, pane
+	return mgr, info, session.Actor{Kind: session.ActorOperator, City: city}, sp
 }
 
 // TestCodexStopTurnStopsBackgroundTerminals: an explicit stop (POST
@@ -133,6 +138,50 @@ func TestCodexInterruptNowSubmitLeavesBackgroundTerminalsRunning(t *testing.T) {
 	}
 	if pane.background != 1 {
 		t.Fatalf("background terminals = %d, want the 1 still running", pane.background)
+	}
+}
+
+// TestCodexStopTurnOfAnIdleSessionStopsBackgroundTerminals: Codex records
+// nothing when Escape reaches it between turns, so a stop of an idle session
+// has no turn end to wait for. It succeeds at once, and still closes the
+// background terminal an earlier turn left running.
+func TestCodexStopTurnOfAnIdleSessionStopsBackgroundTerminals(t *testing.T) {
+	mgr, info, _, sp := newCodexPaneSessionRunning(t, "")
+
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn: %v", err)
+	}
+	if got, want := sp.pane.typedOrPressed(), []string{"key:Escape", "type:/stop", "key:Enter"}; !slices.Equal(got, want) {
+		t.Fatalf("keys reaching the idle Codex pane = %q, want %q", got, want)
+	}
+	if sp.pane.background != 0 {
+		t.Fatalf("background terminals = %d after StopTurn, want 0", sp.pane.background)
+	}
+}
+
+// TestCodexInterruptNowSubmitToAnIdleSessionDeliversWithoutRestart: an
+// interrupt_now submit to an idle Codex session has no turn end to wait for,
+// so it delivers the message to the running session instead of stopping and
+// restarting it into a fresh conversation.
+func TestCodexInterruptNowSubmitToAnIdleSessionDeliversWithoutRestart(t *testing.T) {
+	mgr, info, by, sp := newCodexPaneSessionRunning(t, "")
+	before := len(sp.Calls)
+
+	if _, err := mgr.Submit(context.Background(), by, info.ID, "do this instead", session.BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, session.SubmitIntentInterruptNow); err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	var methods []string
+	for _, call := range sp.Calls[before:] {
+		methods = append(methods, call.Method+":"+call.Message)
+	}
+	if slices.ContainsFunc(methods, func(m string) bool { return strings.HasPrefix(m, "Stop:") || strings.HasPrefix(m, "Start:") }) {
+		t.Fatalf("runtime calls = %q, want no Stop or Start: the idle session must not be restarted", methods)
+	}
+	if !slices.Contains(methods, "NudgeNow:do this instead") {
+		t.Fatalf("runtime calls = %q, want the message delivered to the running session with NudgeNow", methods)
+	}
+	if got, want := sp.pane.typedOrPressed(), []string{"key:Escape"}; !slices.Equal(got, want) {
+		t.Fatalf("keys reaching the idle Codex pane = %q, want %q", got, want)
 	}
 }
 

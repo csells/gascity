@@ -24,13 +24,15 @@ const (
 	defaultDrainMaxUnits     = 100
 
 	// drainPredecessorFailedAction is the ControlResult action of a drain
-	// closed skipped because a blocking predecessor failed.
+	// closed failed, without expanding, because a blocking predecessor failed.
 	drainPredecessorFailedAction = "drain-predecessor-failed"
+	// drainPredecessorFailedReason is that drain's gc.failure_reason.
+	drainPredecessorFailedReason = "predecessor_failed"
 	// drainPredecessorFailedCloseReason is stamped as close_reason on that
 	// drain. It is prose rather than a token for the same reason as
 	// scopeAbortSkippedCloseReason: bd rejects close reasons shorter than 20
 	// characters.
-	drainPredecessorFailedCloseReason = "drain skipped: a blocking predecessor closed with a failed outcome"
+	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
 )
 
 type drainManifest struct {
@@ -81,10 +83,14 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			return ControlResult{}, err
 		}
 		if failedID != "" {
-			opts.tracef("process-control bead=%s kind=drain close reason=predecessor_failed predecessor=%s", bead.ID, failedID)
+			opts.tracef("process-control bead=%s kind=drain close reason=%s predecessor=%s", bead.ID, drainPredecessorFailedReason, failedID)
 			return closeDrainControl(store, bead.ID, map[string]string{
-				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-				"close_reason":              drainPredecessorFailedCloseReason,
+				beadmeta.DrainStateMetadataKey:     beadmeta.DrainStateFailed,
+				beadmeta.OutcomeMetadataKey:        beadmeta.OutcomeFail,
+				beadmeta.FailureClassMetadataKey:   beadmeta.FailureClassHard,
+				beadmeta.FailureReasonMetadataKey:  drainPredecessorFailedReason,
+				beadmeta.FailureSubjectMetadataKey: failedID,
+				"close_reason":                     drainPredecessorFailedCloseReason,
 			}, drainPredecessorFailedAction, opts)
 		}
 	}
@@ -218,9 +224,12 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 // member reservations, unit convoys, item workflow roots that claim
 // worktrees — so it checks its predecessors' outcomes before acting, as a
 // safety net under formulas that do not scope the failure (gc.on_fail =
-// abort_scope) themselves. Only same-root predecessors are
-// judged; a blocker outside the workflow (or not resolvable from this store)
-// is not this workflow's verdict to read.
+// abort_scope) themselves. A drain behind a failed predecessor closes failed,
+// naming it: every reader of the drain's outcome (the steps after it, a drain
+// chained behind it, workflow-finalize) reads skipped as no failure, so a
+// skipped drain would let the run finalize pass and close its source as done.
+// Only same-root predecessors are judged; a blocker outside the workflow (or
+// not resolvable from this store) is not this workflow's verdict to read.
 func failedDrainPredecessor(store beads.Store, drain beads.Bead, rootID string) (string, error) {
 	deps, err := store.DepList(drain.ID, "down")
 	if err != nil {

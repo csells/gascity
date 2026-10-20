@@ -482,8 +482,10 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 // started, which may have begun earlier. The held delivery's own time is its
 // MessageAt, the stamp the runtime stored. A submit
 // the runtime could not confirm may have delivered, so it is Unknown; a
-// nudge refused on a pending interaction, whichever runtime refused it, or
-// one the runtime reports never sent, is a transient miss. Any other error
+// nudge refused on a pending interaction, whichever runtime refused it, one
+// the runtime reports never sent, or one it deferred because the session was
+// running a turn its submit would interrupt (runtime.ErrSessionBusy, nothing
+// left typed), is a transient miss, which counts no failure. Any other error
 // may have come after input reached the session, so it is Unknown too: a
 // retake under a fresh key would deliver it twice.
 func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq, steer bool) opjournal.DeliveryResult {
@@ -516,6 +518,8 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 		return delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)
 	case errors.Is(err, runtime.ErrNudgeRejected):
 		return opjournal.Rejected{KeyRejected: true, Reason: err.Error()}
+	case errors.Is(err, runtime.ErrSessionBusy):
+		return opjournal.NotDelivered{Transient: true, Cause: err}
 	case errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed), errors.As(err, &miss) && miss.Partial:
 		return opjournal.Unknown{Cause: err}
 	case errors.As(err, &miss):

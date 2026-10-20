@@ -1735,3 +1735,44 @@ func TestNudgeStalledPoolContinuations_BusyAtDeliveryRefundsTheAttempt(t *testin
 		t.Fatalf("delivered %d count %q, want attempt 1 delivered once the session is quiet", sp.CountCalls("Nudge", sessionName), got)
 	}
 }
+
+// Kills the continuation backstop's busy hold reading an earlier turn's busy
+// row, holding forever and leaving no record (PR #7944 review): it shares the
+// claim backstop's gate, the live turn reading, with the hold named on the
+// row and the run of holds bounded.
+func TestNudgeStalledPoolContinuations_BusyHoldReadsTheLiveTurnAndIsBounded(t *testing.T) {
+	const sessionName = "session-a"
+	fake := continuationRunningFake(t, sessionName)
+	sp := &liveTurnProvider{Fake: fake, running: true}
+	cfg := continuationNudgeCfg()
+	session := continuationPoolSession("session-bead-a", sessionName)
+	session.Metadata["provider"] = "codex"
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	candidate := validContinuationCandidate("step-a", sessionName)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedContinuationMarker(t, backing, session, candidate, 0, base)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	var out bytes.Buffer
+	tick := func(at time.Time) beads.Bead {
+		fake.SetActivity(sessionName, at.Add(-time.Hour))
+		nudgeStalledPoolContinuations(sp, cfg, backing, []beads.Bead{mustGetTestBead(t, backing, session.ID)}, []ContinuationClaimCandidate{candidate}, false, at, &out)
+		return mustGetTestBead(t, backing, session.ID)
+	}
+
+	got := tick(now)
+	if want := claimHoldTurnRunning + " " + now.Format(time.RFC3339); fake.CountCalls("Nudge", sessionName) != 0 || got.Metadata[continuationClaimNudgeHoldKey] != want {
+		t.Fatalf("nudges %d hold %q, want the running turn held and named %q", fake.CountCalls("Nudge", sessionName), got.Metadata[continuationClaimNudgeHoldKey], want)
+	}
+	due := now.Add(idleClaimNudgeBusyHoldLimit)
+	got = tick(due)
+	if fake.CountCalls("Nudge", sessionName) != 1 || got.Metadata[continuationClaimNudgeCountKey] != "1" || got.Metadata[continuationClaimNudgeHoldKey] != "" {
+		t.Fatalf("nudges %d count %q hold %q, want the session nudged past the bound and the breadcrumb cleared (log %q)",
+			fake.CountCalls("Nudge", sessionName), got.Metadata[continuationClaimNudgeCountKey], got.Metadata[continuationClaimNudgeHoldKey], out.String())
+	}
+
+	sp.running = false // an idle composer under the stale row
+	got = tick(due.Add(idleClaimNudgeBackoff + time.Second))
+	if fake.CountCalls("Nudge", sessionName) != 2 || got.Metadata[continuationClaimNudgeHoldKey] != "" {
+		t.Fatalf("nudges %d hold %q, want the idle session nudged on its first due tick", fake.CountCalls("Nudge", sessionName), got.Metadata[continuationClaimNudgeHoldKey])
+	}
+}

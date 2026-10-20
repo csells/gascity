@@ -911,8 +911,12 @@ A `blocks` edge is satisfied by its predecessor's close whatever
 `gc.outcome` that close carries, but a drain does not expand when a direct
 blocking predecessor in the same workflow closed with a failed outcome: it
 reserves no members, creates no unit convoys or item roots, and closes with
-`gc.outcome = skipped`, so the steps that need it and `workflow-finalize`
-still run.
+`gc.outcome = fail` and `gc.failure_reason = predecessor_failed`, naming the
+predecessor in `gc.failure_subject`. The steps that need it and
+`workflow-finalize` still run, and they see the failure: a drain chained
+behind it does not expand either, and the run finalizes `fail` with its
+source bead left open. A drain inside a scope aborts the scope, like any
+failed scope member.
 
 ```toml
 formula = "review-batch"

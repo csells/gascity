@@ -60,6 +60,13 @@ type codexTurnPane struct {
 	// paste is not a burst.
 	burstEatsEnter bool
 	burst          string
+	// attached makes the pane report one attached client.
+	attached bool
+	// ctrlUKillsLine plays Codex's own Ctrl-U: it deletes back to the start
+	// of the draft's last line, or the line break before an empty last line,
+	// rather than the whole draft. ctrlUIgnored makes Ctrl-U delete nothing.
+	ctrlUKillsLine bool
+	ctrlUIgnored   bool
 	// scrollback is history above the pane's live screen, as a 120-row
 	// capture returns it.
 	scrollback []string
@@ -268,6 +275,9 @@ func (f *codexTurnPane) execute(args []string) (string, error) {
 		case slices.Contains(args, "#{pane_in_mode}"):
 			return "0", nil
 		case slices.Contains(args, "#{session_name}|#{session_attached}"):
+			if f.attached {
+				return f.session + "|1", nil
+			}
 			return f.session + "|0", nil
 		}
 		return "", nil
@@ -326,7 +336,13 @@ func (f *codexTurnPane) sendKeys(args []string) {
 		f.events = append(f.events, "key:"+key)
 		switch key {
 		case "C-u":
-			f.draft = ""
+			switch {
+			case f.ctrlUIgnored:
+			case f.ctrlUKillsLine:
+				f.draft = killToLineStart(f.draft)
+			default:
+				f.draft = ""
+			}
 		case "Escape":
 			if f.running {
 				f.aborted++
@@ -351,6 +367,28 @@ func (f *codexTurnPane) sendKeys(args []string) {
 			}
 		}
 	}
+}
+
+// killToLineStart is draft after one of Codex's Ctrl-U presses with the
+// cursor at its end: the last line's text goes, or, when that line is empty,
+// the line break before it.
+func killToLineStart(draft string) string {
+	i := strings.LastIndex(draft, "\n")
+	switch {
+	case i < 0:
+		return ""
+	case i == len(draft)-1:
+		return draft[:i]
+	default:
+		return draft[:i+1]
+	}
+}
+
+// composer returns what sits typed in the pane's composer.
+func (f *codexTurnPane) composer() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.draft
 }
 
 // keysPressed returns the named keys the pane received, in order.
@@ -772,31 +810,157 @@ func TestSubmitAndConfirmHoldsTheFirstInterruptingSubmitWhileBusy(t *testing.T) 
 	}
 }
 
+// runCodexStartupNudge delivers message through nudgeStartupSession, which
+// takes no ready wait, to a pane running a turn that outlasts the delivery
+// and set up further by setup, inside a synctest bubble.
+func runCodexStartupNudge(t *testing.T, session, message string, setup func(*codexTurnPane)) (*codexTurnPane, error) {
+	t.Helper()
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	var pane *codexTurnPane
+	var err error
+	synctest.Test(t, func(t *testing.T) {
+		pane = newCodexTurnPane(t, session)
+		pane.startEarlierTurn(time.Hour)
+		setup(pane)
+		tm := &Tmux{cfg: DefaultConfig(), exec: pane, codexRolloutHeld: pane.heldRollout}
+		err = tm.nudgeStartupSession(session, message)
+		pane.stop()
+	})
+	return pane, err
+}
+
+// assertHeldSubmitDeferred checks a delivery whose Escape-led submit a
+// running turn held back for the whole confirm window: no submit key reached
+// the turn, the typed message was cleared from the composer, and the error is
+// a deferral (runtime.ErrSessionBusy), never an unconfirmed submit, because
+// no submit was sent.
+func assertHeldSubmitDeferred(t *testing.T, pane *codexTurnPane, err error) {
+	t.Helper()
+	if !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("delivery = %v, want runtime.ErrSessionBusy", err)
+	}
+	if errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("delivery = %v, want no unconfirmed-submit sentinel: no submit was sent", err)
+	}
+	if keys := pane.keysPressed(); slices.Contains(keys, "Escape") || slices.Contains(keys, "Enter") {
+		t.Fatalf("keys = %q, want no submit into the running turn", keys)
+	}
+	if _, aborted, _ := pane.snapshot(); aborted != 0 {
+		t.Fatalf("aborted %d turn(s), want none", aborted)
+	}
+	if draft := pane.composer(); draft != "" {
+		t.Fatalf("composer holds %q, want the typed message cleared", draft)
+	}
+}
+
 // TestCodexStartupNudgeHoldsItsSubmitWhileATurnRuns: the startup nudge takes
 // no ready wait, so it can type into a pane already running a turn. Its
-// Escape-led submit is then held back for the whole confirm window: no
-// Escape reaches the turn, and the error says both "busy" (a deferring caller
-// queues the message) and "unconfirmed" (the startup ladder re-runs the
-// delivery, whose clear replaces the typed text).
+// Escape-led submit is then held back for the whole confirm window, so the
+// message it typed is cleared and the nudge is deferred: a deferring caller
+// queues it, and the startup ladder delivers it again later.
 func TestCodexStartupNudgeHoldsItsSubmitWhileATurnRuns(t *testing.T) {
-	const session = "codex-startup-busy"
+	pane, err := runCodexStartupNudge(t, "codex-startup-busy", codexTurnMarker, func(*codexTurnPane) {})
+	assertHeldSubmitDeferred(t, pane, err)
+}
+
+// TestCodexHeldSubmitClearsItsDraftWithAClientAttached: the clear before the
+// paste is skipped while a client is attached, since a human may be typing,
+// but the message a held submit leaves typed is gc's own and is cleared
+// anyway: a deferral must leave nothing typed behind.
+func TestCodexHeldSubmitClearsItsDraftWithAClientAttached(t *testing.T) {
+	pane, err := runCodexStartupNudge(t, "codex-startup-busy-attached", codexTurnMarker, func(p *codexTurnPane) {
+		p.attached = true
+	})
+	assertHeldSubmitDeferred(t, pane, err)
+}
+
+// TestCodexHeldSubmitClearsAMultilineDraft: Codex's Ctrl-U deletes one line
+// of a multi-line draft at a time, so the clear presses it until the
+// composer reads empty.
+func TestCodexHeldSubmitClearsAMultilineDraft(t *testing.T) {
+	const message = "first line of the nudge\nsecond line\nthird line"
+	pane, err := runCodexStartupNudge(t, "codex-startup-busy-multiline", message, func(p *codexTurnPane) {
+		p.ctrlUKillsLine = true
+	})
+	assertHeldSubmitDeferred(t, pane, err)
+	if _, _, events := pane.snapshot(); !slices.Contains(events, "paste:"+message) {
+		t.Fatalf("events = %q, want the message pasted before it was cleared", events)
+	}
+}
+
+// TestCodexHeldSubmitWhoseDraftWillNotClearIsNotADeferral: when the composer
+// still holds the message after the clear, the nudge is neither a deferral,
+// which promises nothing typed is left, nor an unconfirmed submit, since none
+// was sent: callers count the attempt as failed.
+func TestCodexHeldSubmitWhoseDraftWillNotClearIsNotADeferral(t *testing.T) {
+	pane, err := runCodexStartupNudge(t, "codex-startup-busy-stuck-draft", codexTurnMarker, func(p *codexTurnPane) {
+		p.ctrlUIgnored = true
+	})
+	if err == nil || errors.Is(err, runtime.ErrSessionBusy) || errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("nudgeStartupSession = %v, want an error that is neither runtime.ErrSessionBusy nor unconfirmed", err)
+	}
+	if !errors.Is(err, errNudgeSubmitHeld) {
+		t.Fatalf("nudgeStartupSession = %v, want errNudgeSubmitHeld", err)
+	}
+	if draft := pane.composer(); draft != codexTurnMarker {
+		t.Fatalf("composer holds %q, want the message still typed", draft)
+	}
+	if keys := pane.keysPressed(); slices.Contains(keys, "Escape") || slices.Contains(keys, "Enter") {
+		t.Fatalf("keys = %q, want no submit into the running turn", keys)
+	}
+}
+
+// TestCodexStartupLadderDeliversAHeldNudgeOnceTheTurnEnds drives the startup
+// retry ladder over a real delivery into a pane whose startup turn is still
+// running: each held attempt is deferred with its draft cleared, the busy
+// pane is never taken for a delivery, and the nudge lands once, after the
+// turn ends.
+func TestCodexStartupLadderDeliversAHeldNudgeOnceTheTurnEnds(t *testing.T) {
+	const session = "codex-startup-ladder"
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	synctest.Test(t, func(t *testing.T) {
+		pane := newCodexTurnPane(t, session)
+		pane.startEarlierTurn(10 * time.Second)
+		ops := &tmuxStartOps{tm: &Tmux{cfg: DefaultConfig(), exec: pane, codexRolloutHeld: pane.heldRollout}}
+
+		err := sendStartupNudgeWithRetry(context.Background(),
+			func() error { return ops.sendKeys(session, codexTurnMarker) },
+			func(d time.Duration) { <-time.After(d) },
+			func() (bool, error) { return ops.paneBusy(session) })
+		<-time.After(time.Minute)
+		pane.stop()
+
+		if err != nil {
+			t.Fatalf("sendStartupNudgeWithRetry = %v, want nil once the turn ended", err)
+		}
+		recorded, aborted, events := pane.snapshot()
+		if aborted != 0 || !slices.Equal(recorded, []string{codexTurnMarker}) {
+			t.Fatalf("recorded %q, aborted %d; want the nudge once and no abort; events %q", recorded, aborted, events)
+		}
+	})
+}
+
+// TestCodexStartupLadderNeverTakesAHeldNudgeForDelivered: a startup turn that
+// outlasts the whole ladder keeps every attempt's submit held. Its busy pane
+// is the turn that held the submit, not the nudge landing, so the ladder
+// returns the deferral, with nothing left typed, instead of nil.
+func TestCodexStartupLadderNeverTakesAHeldNudgeForDelivered(t *testing.T) {
+	const session = "codex-startup-ladder-busy"
 	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
 	synctest.Test(t, func(t *testing.T) {
 		pane := newCodexTurnPane(t, session)
 		pane.startEarlierTurn(time.Hour)
-		tm := &Tmux{cfg: DefaultConfig(), exec: pane, codexRolloutHeld: pane.heldRollout}
+		ops := &tmuxStartOps{tm: &Tmux{cfg: DefaultConfig(), exec: pane, codexRolloutHeld: pane.heldRollout}}
 
-		err := tm.nudgeStartupSession(session, codexTurnMarker)
+		err := sendStartupNudgeWithRetry(context.Background(),
+			func() error { return ops.sendKeys(session, codexTurnMarker) },
+			func(d time.Duration) { <-time.After(d) },
+			func() (bool, error) { return ops.paneBusy(session) })
 		pane.stop()
 
-		if !errors.Is(err, runtime.ErrSessionBusy) || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-			t.Fatalf("nudgeStartupSession = %v, want runtime.ErrSessionBusy and ErrNudgeSubmitUnconfirmed", err)
-		}
-		if slices.Contains(pane.keysPressed(), "Escape") || slices.Contains(pane.keysPressed(), "Enter") {
-			t.Fatalf("keys = %q, want no submit into the running turn", pane.keysPressed())
-		}
-		if _, aborted, _ := pane.snapshot(); aborted != 0 {
-			t.Fatalf("aborted %d turn(s), want none", aborted)
+		assertHeldSubmitDeferred(t, pane, err)
+		if recorded, _, _ := pane.snapshot(); len(recorded) != 0 {
+			t.Fatalf("Codex recorded %q, want nothing while the startup turn runs", recorded)
 		}
 	})
 }

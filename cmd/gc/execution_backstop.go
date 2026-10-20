@@ -433,13 +433,15 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now)
+	return sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
 }
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
 // session sessName (its row s) from being treated as quiet at now, "" when it
-// is quiet. The pool-claim backstop reads it before its terminal drain.
-func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+// is quiet, its screen read by screen. The pool-claim backstop reads it before
+// its terminal drain, with the screen read as its nudges read it
+// (turnHoldFor).
+func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time, screen func(runtime.Provider, string) string) string {
 	last, err := sp.GetLastActivity(sessName)
 	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
@@ -447,7 +449,7 @@ func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now ti
 	if !executionSnapshotVetoApplies(s.Metadata) {
 		return ""
 	}
-	return snapshotHoldFor(sp, sessName)
+	return screen(sp, sessName)
 }
 
 // snapshotHoldFor asks the runtime sp whether a session whose activity clock is
@@ -528,9 +530,9 @@ func (p poolExecutionBackstop) content(s beads.Bead) string {
 // seconds ago. A failed read HOLDS: it is not proof the claim went away. The
 // session itself needs no second look here: resolve already proved it quiet
 // (quietHold) on this tick.
-func (p poolExecutionBackstop) revalidate(_ beads.Bead, _ string, target backstopTarget) backstopResolution {
+func (p poolExecutionBackstop) revalidate(_ beads.Bead, _ string, target backstopTarget) (backstopResolution, string) {
 	res, _ := revalidateExecutionClaim(target)
-	return res
+	return res, ""
 }
 
 // revalidateExecutionClaim is revalidate's verdict on target, with the

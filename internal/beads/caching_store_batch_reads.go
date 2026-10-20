@@ -74,8 +74,9 @@ func (c *CachingStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Be
 	}
 	out = append(out, unrequested...)
 	// As a ParentID List does: a batched read is often the first reader to
-	// see a close made by another process; announce what it installed.
-	c.announceUnannouncedCloses()
+	// see a close or a claim made by another process; announce what it
+	// installed.
+	c.announceReadInstalls()
 	return out, nil
 }
 

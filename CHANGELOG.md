@@ -235,6 +235,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check. Before, it stopped at the first error and skipped a store it could
   not open without saying so (#6614).
 
+- **Builtin `codex` agents no longer default to `gpt-5.5` at `xhigh`
+  reasoning effort.** Unless the city, agent or session chooses a `model` or
+  `effort`, Gas City passes no `--model` or `model_reasoning_effort` flag, and
+  codex runs on the model and effort from the user's own
+  `~/.codex/config.toml`, which is often a different model and a lower effort.
+  The builtin pin broke every turn for logins that cannot use that model. The
+  launch command of every unpinned `builtin:codex` session changes, so each
+  such session restarts once after the upgrade. To keep the old behavior, pin
+  it for every agent on the harness in `city.toml` (`[providers.codex]` with
+  `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
+  agent with the same `option_defaults` line in its `agent.toml` (#7944).
+
 ### Added
 
 - **`gc agent is-foreign <identity>` reports whether this city can vouch for

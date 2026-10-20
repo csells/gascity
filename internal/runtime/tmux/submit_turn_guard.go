@@ -83,6 +83,21 @@ func (t *Tmux) turnRunning(target, family string) (bool, error) {
 	return paneShowsRunningTurn(lines, family), nil
 }
 
+// TurnRunning reports whether session's agent is running a turn now, read
+// from its agent pane the way the nudge's turn guard reads it before typing
+// (paneShowsRunningTurn): for Codex the status rows right above its live
+// composer, so a Working row an earlier turn left in the scrollback is not a
+// running turn; for every other family a busy indicator anywhere in the
+// capture, as SnapshotIdle reads it. A pane that cannot be resolved or
+// captured is an error, never a reading.
+func (t *Tmux) TurnRunning(session string) (bool, error) {
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return false, err
+	}
+	return t.turnRunning(target, t.nudgeSubmitFamily(target))
+}
+
 // codexTurnStatusRows bounds the rows read above Codex's live composer for
 // its status: the "• Working (… esc to interrupt)" row and the queued
 // follow-ups Codex lists under it.

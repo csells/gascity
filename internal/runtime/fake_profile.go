@@ -73,6 +73,7 @@ type ProfileBackend interface {
 	TurnEventProvider
 	TurnFenceProvider
 	TurnObservationProvider
+	TurnRunningProvider
 	UnattendedSessionStopper
 }
 
@@ -83,7 +84,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -182,6 +183,7 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait
 		localTranscriptTrait
@@ -465,6 +467,17 @@ func (f FullFake) SnapshotIdle(name string) (bool, error) {
 	defer f.mu.Unlock()
 	_, running := f.sessions[name]
 	return running, nil
+}
+
+// TurnRunning implements [TurnRunningProvider]: a running session runs no
+// turn, and a session that is not running cannot be looked at.
+func (f FullFake) TurnRunning(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, running := f.sessions[name]; !running {
+		return false, fmt.Errorf("turn of %q: %w", name, ErrSessionNotFound)
+	}
+	return false, nil
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,

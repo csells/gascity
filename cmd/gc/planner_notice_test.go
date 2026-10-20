@@ -516,8 +516,8 @@ func (noticeTestBackstop) state(s beads.Bead, _ backstopTarget) (bool, int, time
 	return true, atoiOr0(s.Metadata[noticeTestAttemptsKey]), at
 }
 func (p noticeTestBackstop) content(beads.Bead) string { return p.text }
-func (noticeTestBackstop) revalidate(beads.Bead, string, backstopTarget) backstopResolution {
-	return backstopResolutionOutstanding
+func (noticeTestBackstop) revalidate(beads.Bead, string, backstopTarget) (backstopResolution, string) {
+	return backstopResolutionOutstanding, ""
 }
 func (noticeTestBackstop) observe(beads.Store, *beads.Bead, backstopTarget, time.Time, io.Writer) {}
 func (p noticeTestBackstop) reserve(store beads.Store, s *beads.Bead, _ backstopTarget, attempts int, now time.Time, _ io.Writer) bool {

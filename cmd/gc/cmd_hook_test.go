@@ -1125,7 +1125,8 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 // a later federated store must not inherit the primary's semantics — its error
 // is not emitted as this session's work-query failure (the original bug:
 // bestStoreWithWork keyed "own store" on slice position, so the federated store
-// became index 0 after the primary was removed).
+// became index 0 after the primary was removed). It is recorded under that
+// store's own name instead (hookStoreFailureReport).
 //
 // It used to also pin that the claim then drained as "no work". That half is
 // gone: the only store left could not be read, so "no work" was never
@@ -1167,14 +1168,15 @@ func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing
 		JSON:               true,
 	}
 
-	emitted := false
+	var emitted []error
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(_ string, err error) { emitted = append(emitted, err) }, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 1 (failed read, no drain); stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if emitted {
-		t.Fatal("a federated-store error after the primary lost its race must not emit a work-query failure")
+	var store *hookStoreReadError
+	if len(emitted) != 1 || !errors.As(emitted[0], &store) || store.dir != "riga" {
+		t.Fatalf("emitted %v; a federated-store error after the primary lost its race must be recorded once as that store's, not as this session's own work-query failure", emitted)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want no drain result over an unread store", stdout.String())

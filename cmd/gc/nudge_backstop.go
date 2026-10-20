@@ -47,8 +47,10 @@ type backstopPredicate interface {
 	// closes the desired-state-snapshot race without treating a read failure
 	// as proof that work disappeared, and it is where a predicate whose
 	// resolve does not already prove the session quiet refuses to type into a
-	// running turn (claimNudgeBusyHold): Hold spends no attempt.
-	revalidate(s beads.Bead, sessName string, target backstopTarget) backstopResolution
+	// running turn (claimNudgeBusyHold): Hold spends no attempt. A hold may
+	// name the gate that held, for backstopHoldObserver; "" names it
+	// backstopHoldRevalidate.
+	revalidate(s beads.Bead, sessName string, target backstopTarget) (backstopResolution, string)
 
 	// observe persists the start of a new assignment's grace window.
 	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
@@ -265,9 +267,13 @@ func runNudgeBackstop(
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
-			switch pred.revalidate(*s, sessName, target) {
+			resolution, hold := pred.revalidate(*s, sessName, target)
+			switch resolution {
 			case backstopResolutionHold:
-				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
+				if hold == "" {
+					hold = backstopHoldRevalidate
+				}
+				observeBackstopHold(pred, store, s, hold, stdout)
 				continue
 			case backstopResolutionClear:
 				clearBackstop(pred, store, s, label, stdout)

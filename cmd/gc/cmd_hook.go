@@ -37,7 +37,10 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Without --inject: prints normalized ready-only output, exits 0 if work exists,
 1 if the queue is empty, and 2 if the work query itself failed (for example bd
-missing from PATH or a store bd could not read); the failure is named on stderr.
+missing from PATH, a store bd could not read, or a store environment that could
+not be built); the failure is named on stderr. A suspended city, rig or agent,
+and an error before the work query is built (no agent named, a city or config
+that cannot be loaded, an unknown agent), also exit 1.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item. A
 failed work query is an error (nothing on stdout), never a drain result.
@@ -49,7 +52,13 @@ unknown, not empty. This applies with and without --claim. Any other
 work-query failure exits 2 without --claim and 1 with --claim. Neither writes a
 drain result. When another store the hook searches serves work, a store that
 failed is named on stderr and the work is served; when no store has work, a
-failed read of any of them is a failed query, not an empty queue.
+failed read of any of them is a failed query, not an empty queue, so a rig
+store that cannot be read keeps every city-scoped agent that searches it from
+draining until it answers again. Two kinds of rig are exceptions: a suspended
+rig is not searched at all (gc ready does not read it either), and a rig whose
+managed Dolt server is not running is named on stderr but does not hold the
+answer up. A failed query is also recorded as a session.work_query_failed event,
+one per store that failed, naming it.
 
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
@@ -450,10 +459,15 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	} else {
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
-	overrides, err := hookQueryEnv(cityPath, cfg, &a)
+	overrides, err := hookStoreQueryEnv(cityPath, cfg, &a)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook: building work query env: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		// The query never ran: not the empty-queue exit 1 on the discovery door
+		// (hookExitWorkQueryFailed), and no drain result on the claim door.
+		if opts.Claim {
+			return 1
+		}
+		return hookExitWorkQueryFailed
 	}
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
@@ -494,7 +508,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
 		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
 	} else {
-		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
 	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
@@ -508,7 +522,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		emitCityWorkQueryFailure(cityPath, stderr,
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
-	runner := hookDiscoveryRunner(stores, shellWorkQueryWithEnv, emitQueryFailure, stderr)
+	runner := hookDiscoveryRunner(stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnv), emitQueryFailure, stderr)
 	// The stale-session fence already ran before agent resolution above; this
 	// sessionID feeds only the claim/visibility assignee identity.
 	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
@@ -816,7 +830,8 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
@@ -852,12 +867,16 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// must never inherit that emit-on-timeout semantics, so it is matched by
 	// identity, not slice index. A later store's failed read is still a failed
 	// read, though: with no work anywhere it ends the claim below without a
-	// drain (bestStoreWithWork's hookSecondaryStoreFailure).
+	// drain (bestStoreWithWork's hookSecondaryStoreFailure), unless it is a rig
+	// whose managed Dolt runtime is not running (errHookRigRuntimeUnavailable).
+	// Each failed store is reported once per invocation however often the loop
+	// reads it (hookStoreFailureReport).
 	var primary hookStore
 	if len(stores) > 0 {
 		primary = stores[0]
 	}
-	noteStoreFailure := hookStoreFailureLogger("gc hook --claim", stderr)
+	report := newHookStoreFailureReport("gc hook --claim", stderr, emitFailure)
+	noteStoreFailure := report.note
 	remaining := stores
 	// claimsErrored aggregates the per-store signal that a store reported ready
 	// work but every eligible claim mutation errored, so the shared drain below can
@@ -866,7 +885,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	for len(remaining) > 0 {
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
-			hookEmitWorkQueryFailure(emitFailure, workQuery, err)
+			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(selected) {
@@ -878,7 +897,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// later, so it gets the same classification.
 		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
 		if err != nil {
-			hookEmitWorkQueryFailure(emitFailure, workQuery, err)
+			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(claimStore) {
@@ -1253,9 +1272,10 @@ type hookVisibility struct {
 // hook, not only one that overruns the deadline. Other stores gc hook queries
 // beside the agent's own (bestStoreWithWork) reach it only when no store has
 // work (hookSecondaryStoreFailure); a secondary store that failed while another
-// served work is named on stderr, not reported as a failed query. A federated
-// reader (`gc ready`) is not one of those: it runs as the primary store's
-// query, so a leg it cannot read fails the primary read.
+// served work, or a rig whose managed Dolt runtime is not running, is named on
+// stderr, not reported as a failed query. A federated reader (`gc ready`) is
+// not one of those: it runs as the primary store's query, so a leg it cannot
+// read fails the primary read.
 const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
 
 // bdConnectionErrorMarkers mirrors the messages bd's Dolt store counts as the
@@ -1336,6 +1356,18 @@ func (f workQueryFailure) Unwrap() error { return f.err }
 // is returned as-is and stays an ordinary exit-1 error.
 func classifyWorkQueryStoreUnavailable(err error) error {
 	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
+		return err
+	}
+	// Secondary stores of the fan-out failed: unavailable when any of them got
+	// no answer. Each is classified on its own whole failure, since the
+	// aggregate's message is the bounded report (hookStoreReadError).
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		for _, failure := range secondary.failures {
+			if workQueryStoreUnavailable(failure.err) {
+				return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+			}
+		}
 		return err
 	}
 	// Every text scan skips the command line the runner quotes into its
@@ -1422,23 +1454,15 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 }
 
 // hookDiscoveryRunner is plain `gc hook`'s work-query runner: the best answer
-// across the agent's stores (bestStoreWithWork). A failed read is returned as
-// the query's error — and emitted when it is the agent's own store's — and a
-// secondary store that failed while another served work is reported on stderr.
+// across the agent's stores (bestStoreWithWork). A failed query is returned as
+// its error and recorded through emitFailure, and a store whose failed read the
+// answer did not stop on is named on stderr (hookStoreFailureReport).
 func hookDiscoveryRunner(stores []hookStore, run hookStoreRunner, emitFailure func(command string, err error), stderr io.Writer) WorkQueryRunner {
-	noteStoreFailure := hookStoreFailureLogger("gc hook", stderr)
+	report := newHookStoreFailureReport("gc hook", stderr, emitFailure)
 	return func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], run, noteStoreFailure)
-		hookEmitWorkQueryFailure(emitFailure, command, err)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], run, report.note)
+		report.failed(command, err)
 		return out, err
-	}
-}
-
-// hookStoreFailureLogger reports a secondary store whose read failed while
-// work was served from another store.
-func hookStoreFailureLogger(label string, stderr io.Writer) hookStoreFailureNote {
-	return func(failure *hookStoreReadError) {
-		fmt.Fprintf(stderr, "%s: %v; serving work from the stores that answered\n", label, failure) //nolint:errcheck // best-effort stderr
 	}
 }
 

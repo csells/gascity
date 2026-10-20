@@ -83,6 +83,27 @@ func TestCodexSubmitIsNotHeldByAStaleWorkingRowInTheScrollback(t *testing.T) {
 	}
 }
 
+// The live turn reading the claim backstops ask for (runtime.TurnRunningProvider)
+// is the nudge guard's own: an idle Codex composer under an earlier turn's
+// Working row runs no turn, though SnapshotIdle, which counts an indicator
+// anywhere in the capture, reads that pane busy; a Working row right above
+// the live composer is a running turn.
+func TestTurnRunningReadsTheLiveComposer(t *testing.T) {
+	tm := NewTmux()
+	p := &Provider{tm: tm}
+	tm.exec = &codexStaticPane{screen: readCodexApprovalFixture(t, codexStaleWorkingFixture)}
+	if running, err := p.TurnRunning("lab"); err != nil || running {
+		t.Errorf("TurnRunning under a stale Working row = %v, %v; want false, nil: the live composer is idle", running, err)
+	}
+	if idle, err := tm.SnapshotIdle("lab"); err != nil || idle {
+		t.Errorf("SnapshotIdle under a stale Working row = %v, %v; want the capture scan's busy reading, false, nil", idle, err)
+	}
+	tm.exec = &codexStaticPane{screen: strings.Join(codexWorkingWithBackgroundTerminalPane, "\n")}
+	if running, err := p.TurnRunning("lab"); err != nil || !running {
+		t.Errorf("TurnRunning with a Working row above the live composer = %v, %v; want true, nil", running, err)
+	}
+}
+
 func TestPaneShowsRunningTurn(t *testing.T) {
 	split := func(s string) []string { return strings.Split(s, "\n") }
 	idle := split(readCodexApprovalFixture(t, "idle-after-deny-0.162.1-80x24.txt"))

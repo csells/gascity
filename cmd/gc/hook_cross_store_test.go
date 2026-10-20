@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -473,7 +474,7 @@ func TestBestStoreWithWorkSurfacesRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 	// best-effort and answer the city store's "[]", which drained seats whose
 	// work sat in the unread rig. The error now surfaces as a secondary-store
 	// failure: a failed query to the caller, but not this session's own store
-	// failing (hookEmitWorkQueryFailure does not escalate it).
+	// failing (hookStoreFailureReport emits it under the rig store's name).
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, dir string, _ []string) (string, error) {
 		if dir == "city" {
@@ -518,19 +519,40 @@ func TestBestStoreWithWorkOwnStoreErrorTakesPrecedenceOverRigStoreError(t *testi
 	}
 }
 
-func TestHookEmitWorkQueryFailureSkipsSecondaryStoreFailures(t *testing.T) {
+// TestHookStoreFailureReportEmitsEachFailedStoreOnce pins the event half of a
+// query that failed on secondary stores: each failed store is emitted on its
+// own, as itself, once per invocation however many failed reads name it; a
+// failure the answer did not stop on is a stderr line, once, and no event; and
+// the agent's own store's failure is still emitted as the query's error.
+func TestHookStoreFailureReportEmitsEachFailedStoreOnce(t *testing.T) {
 	var emitted []error
 	emit := func(_ string, err error) { emitted = append(emitted, err) }
-	secondary := &hookSecondaryStoreFailure{failures: []*hookStoreReadError{{dir: "riga", err: errTestStoreTimeout}}}
-	hookEmitWorkQueryFailure(emit, "q", secondary)
-	hookEmitWorkQueryFailure(emit, "q", hookClaimRetryWindowClosed(secondary, &hookClaimOps{}))
-	hookEmitWorkQueryFailure(emit, "q", nil)
-	if len(emitted) != 0 {
-		t.Fatalf("emitted %v; a rig store's failure is not this session's work-query failure", emitted)
+	var stderr strings.Builder
+	report := newHookStoreFailureReport("gc hook --claim", &stderr, emit)
+	riga := &hookStoreReadError{dir: "riga", rig: "riga", err: errTestStoreTimeout}
+	rigb := &hookStoreReadError{dir: "rigb", rig: "rigb", err: errTestStoreTimeout}
+	rigc := &hookStoreReadError{dir: "rigc", rig: "rigc", err: errTestStoreTimeout}
+	secondary := &hookSecondaryStoreFailure{failures: []*hookStoreReadError{riga, rigb}}
+
+	report.failed("q", secondary)
+	report.failed("q", hookClaimRetryWindowClosed(secondary, &hookClaimOps{}))
+	report.failed("q", nil)
+	if len(emitted) != 2 || !errors.Is(emitted[0], riga) || !errors.Is(emitted[1], rigb) {
+		t.Fatalf("emitted %v, want riga's and rigb's failures, once each", emitted)
 	}
-	hookEmitWorkQueryFailure(emit, "q", errTestStoreTimeout)
-	if len(emitted) != 1 {
-		t.Fatalf("emitted %v, want the own store's failure emitted once", emitted)
+
+	report.note(rigc)
+	report.note(rigc)
+	if len(emitted) != 2 {
+		t.Fatalf("emitted %v; a failure the answer did not stop on is not a failed query", emitted)
+	}
+	if got := strings.Count(stderr.String(), `rig "rigc"`); got != 1 {
+		t.Fatalf("stderr names rigc %d times, want once: %q", got, stderr.String())
+	}
+
+	report.failed("q", errTestStoreTimeout)
+	if len(emitted) != 3 || !errors.Is(emitted[2], errTestStoreTimeout) {
+		t.Fatalf("emitted %v, want the own store's failure emitted as itself", emitted)
 	}
 }
 
