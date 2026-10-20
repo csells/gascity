@@ -3243,7 +3243,7 @@ export const zSessionTurnCurrent = z.object({
 });
 
 export const zSessionTurnEnded = z.object({
-    ended_at: z.iso.datetime(),
+    ended_at: z.iso.datetime().optional(),
     id: z.string(),
     inferred: z.boolean(),
     started_at: z.iso.datetime().optional(),
@@ -10543,6 +10543,10 @@ export const zGetV0CityByCityNameReadinessResponse = zReadinessResponse;
 export const zGetRequestOutcomePath = z.object({
     cityName: z.string().min(1).regex(/\S/),
     requestId: z.string()
+});
+
+export const zGetRequestOutcomeQuery = z.object({
+    after_seq: z.string().regex(/^[0-9]+$/)
 });
 
 /**

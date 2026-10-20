@@ -228,7 +228,8 @@ func recordAcked(rec events.Recorder, e events.Event) error {
 // city's event log (from's, when the city has no live Server), after the
 // events kept before it. An event the log refuses is kept, to be recorded
 // when the supervisor builds the city's next Server, before the city's next
-// emit, or before a same-key retry of its request is answered.
+// emit, before a same-key retry of its request is answered, or when its
+// request's outcome is looked up (lookupRequestOutcome).
 func (c *cityOps) emit(from *Server, requestID, operation string, e events.Event) {
 	c.emitMu.Lock()
 	defer c.emitMu.Unlock()

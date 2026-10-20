@@ -267,7 +267,7 @@ export type AnnotatedProviderResponse = {
 
 export type AsyncAcceptedBody = {
     /**
-     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty.
      */
     event_cursor: string;
     /**
@@ -3307,7 +3307,7 @@ export type RequestOutcome = {
      */
     request_id: string;
     /**
-     * pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+     * pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
      */
     state: 'pending' | 'succeeded' | 'failed' | 'outcome_unknown';
 };
@@ -5465,9 +5465,9 @@ export type SessionTurnCurrent = {
 
 export type SessionTurnEnded = {
     /**
-     * When the turn ended: the source's time, or the server's for an inferred end.
+     * When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again.
      */
-    ended_at: string;
+    ended_at?: string;
     /**
      * The turn's id, as the source records it. Opaque; compare for equality only.
      */
@@ -18587,7 +18587,12 @@ export type GetRequestOutcomeData = {
          */
         requestId: string;
     };
-    query?: never;
+    query: {
+        /**
+         * The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.
+         */
+        after_seq: string;
+    };
     url: '/v0/city/{cityName}/request/{requestId}';
 };
 

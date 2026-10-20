@@ -69,7 +69,7 @@ type SessionCreateInput struct {
 type asyncAcceptedBody struct {
 	Status      string `json:"status" doc:"Async request status." example:"accepted"`
 	RequestID   string `json:"request_id" doc:"Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
-	EventCursor string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty."`
+	EventCursor string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty."`
 	// IdempotencyKey, Replayed and Op are set only when the server recorded
 	// the request as an operation (an ops gate is auto or require).
 	IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery."`

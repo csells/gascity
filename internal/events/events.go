@@ -769,6 +769,13 @@ type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
 }
 
+// InFlightContextProvider is an optional extension for providers whose
+// in-flight-aware read ([InFlightProvider]) can stop when ctx is done, so a
+// read whose caller has gone does not run to the end of a long history.
+type InFlightContextProvider interface {
+	ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error)
+}
+
 // Watcher yields events one at a time. Created by [Provider.Watch].
 // Callers must call Close() when done watching.
 type Watcher interface {

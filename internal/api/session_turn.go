@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -16,9 +17,11 @@ import (
 // be trusted, and what one read of them saw now. It aims nothing at a turn: a
 // turn-scoped stop or interrupt is the worker's TI-2b2 slice, not this read.
 
-// sessionTurnReadBound bounds one turn read's session reload and runtime
-// probes, so a wedged runtime answers unavailable instead of holding the
-// request. A transcript's file reads take no context and are not bounded.
+// sessionTurnReadBound bounds one turn read's runtime probes (the protocol
+// history read and the idle snapshots), so a wedged runtime answers
+// unavailable instead of holding the request. The session's reloads, whose
+// runtime overlay takes no context either, and a transcript's file reads are
+// not bounded.
 const sessionTurnReadBound = 10 * time.Second
 
 // The observation values of a session turn read.
@@ -60,7 +63,7 @@ type sessionTurnCurrent struct {
 type sessionTurnEnded struct {
 	ID        string     `json:"id" doc:"The turn's id, as the source records it. Opaque; compare for equality only."`
 	StartedAt *time.Time `json:"started_at,omitempty" doc:"When the turn started, at the source's precision; absent when unknown."`
-	EndedAt   time.Time  `json:"ended_at" doc:"When the turn ended: the source's time, or the server's for an inferred end."`
+	EndedAt   *time.Time `json:"ended_at,omitempty" doc:"When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again."`
 	// Status carries no enum keyword: a "failed" member would collide with
 	// SlingChildOutcomeOutcome's in the generated Go client and rename its
 	// constants.
@@ -114,8 +117,13 @@ func (s *Server) humaHandleSessionTurn(ctx context.Context, input *SessionIDInpu
 	case err == nil:
 		resp.Observation = sessionTurnObserved
 		resp.observe(hist)
-	case errors.Is(err, runtime.ErrSessionNotFound):
+	case worker.TurnSessionGone(err):
 		return nil, sessionTurnReadError(id, err)
+	case errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// No runtime is bound to the open session (DES-T3I D2): no turn runs,
+		// as /stop reads it.
+		resp.Observation = sessionTurnObserved
+		resp.observe(runtime.TurnHistory{ObservedAt: time.Now()})
 	case errors.Is(err, runtime.ErrTurnIdentityUnsupported):
 		resp.Observation = sessionTurnUnsupported
 		resp.Detail = "the session's turn source records turns without ids"
@@ -123,19 +131,22 @@ func (s *Server) humaHandleSessionTurn(ctx context.Context, input *SessionIDInpu
 		errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		// The worker's error can name the transcript's path or the
 		// conversation's key, which the API does not expose, so the detail
-		// is fixed.
+		// is fixed and the cause is logged.
+		log.Printf("api: the turns of session %s could not be read now: %v", id, err)
 		resp.Observation = sessionTurnUnavailable
 		resp.Detail = "the session's turn source could not be read now (a transcript not written yet, no conversation key yet, or a runtime that did not answer); its turns are unknown, not idle"
 	default:
+		log.Printf("api: reading the turns of session %s: %v", id, err)
 		return nil, apierr.Internal.Msg("reading the turns of session " + id + " failed")
 	}
 	return &IndexOutput[sessionTurnResponse]{Index: index, Body: resp}, nil
 }
 
 // sessionTurnReadError maps a failed capability composition or turn read: a
-// session that is gone or closed is 404, anything else as session errors map.
+// session whose row is gone, closed or not a session is 404, anything else as
+// session errors map.
 func sessionTurnReadError(id string, err error) error {
-	if errors.Is(err, runtime.ErrSessionNotFound) {
+	if worker.TurnSessionGone(err) {
 		return apierr.SessionNotFound.Msg("not_found: session " + id + " is closed or gone")
 	}
 	return humaSessionManagerError(err)
@@ -154,7 +165,7 @@ func (r *sessionTurnResponse) observe(hist runtime.TurnHistory) {
 		r.Recent = append(r.Recent, sessionTurnEnded{
 			ID:        t.TurnID,
 			StartedAt: optionalTurnTime(t.StartedAt),
-			EndedAt:   t.EndedAt.UTC(),
+			EndedAt:   optionalTurnTime(t.EndedAt),
 			Status:    string(t.Status),
 			Inferred:  t.Inferred,
 		})

@@ -184,7 +184,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 	}
 	go func() {
 		defer finishRequest()
-		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
+		defer s.recoverSessionCreate(reqID)
 		if transport == "acp" {
 			var mcpMetaErr error
 			extraMeta, mcpMetaErr = session.WithStoredMCPMetadata(extraMeta, workDirQualifiedName, mcpServers)
@@ -374,7 +374,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	}
 	go func() {
 		defer finishRequest()
-		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
+		defer s.recoverSessionCreate(reqID)
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
@@ -1069,9 +1069,11 @@ func awaitSend(d messageDelivery, operation string, timeout time.Duration, timed
 // the API cannot know whether a delivery still in flight will land, so an
 // event it emitted at a deadline would be a guess, and a "failed" guess makes
 // a retry duplicate the message. Its delivery runs to its real outcome, which
-// is the request's one terminal event; the provider paths bound their own
-// waits, and a delivery still in flight after
-// sessionMessageSlowDeliveryLogAfter is logged.
+// is the request's one terminal event. Not every provider bounds a delivery (a
+// k8s, herdr or ssh runtime's nudge sets no deadline of its own), so one to a
+// wedged runtime stays pending, with no terminal event, until the runtime
+// answers; a delivery still in flight after sessionMessageSlowDeliveryLogAfter
+// is logged.
 func (s *Server) deliverMessage(d messageDelivery, message string, resume bool) {
 	var timeout time.Duration
 	if d.adm != nil && d.adm.Recorded {

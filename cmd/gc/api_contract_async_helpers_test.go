@@ -109,7 +109,7 @@ func (h *contractHarness) expectEventListed(t *testing.T, eventType, requestID s
 // and checks it reports the same terminal event the stream delivered.
 func (h *contractHarness) expectSessionRequestOutcome(t *testing.T, acc contractAccepted, operation string, terminal events.Event) {
 	t.Helper()
-	resp, err := h.client.GetRequestOutcomeWithResponse(h.ctx, contractCityName, acc.RequestID)
+	resp, err := h.client.GetRequestOutcomeWithResponse(h.ctx, contractCityName, acc.RequestID, &genclient.GetRequestOutcomeParams{AfterSeq: acc.EventCursor})
 	expectStatus(t, "get request outcome "+acc.RequestID, resp, err, http.StatusOK)
 	got := mustJSON(t, "get request outcome "+acc.RequestID, resp.JSON200, resp)
 	wantState := genclient.RequestOutcomeState("succeeded")
@@ -138,7 +138,7 @@ func (h *contractHarness) expectSessionRequestOutcome(t *testing.T, acc contract
 // typed request-not-found 404.
 func (h *contractHarness) expectUnknownRequestNotFound(t *testing.T) {
 	t.Helper()
-	resp, err := h.client.GetRequestOutcomeWithResponse(h.ctx, contractCityName, "req-000000000000000000000000")
+	resp, err := h.client.GetRequestOutcomeWithResponse(h.ctx, contractCityName, "req-000000000000000000000000", &genclient.GetRequestOutcomeParams{AfterSeq: "0"})
 	expectStatus(t, "get unknown request outcome", resp, err, http.StatusNotFound)
 	if p := resp.ApplicationproblemJSON404; p == nil || p.Type == nil || *p.Type != "urn:gascity:error:request-not-found" {
 		t.Fatalf("unknown request outcome problem = %s, want urn:gascity:error:request-not-found", string(resp.Body))

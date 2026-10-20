@@ -139,20 +139,22 @@ progression.
    supervisor builds a restarted city's new `Server` only when a request
    for the city arrives, so a delivery can finish after the restart closed
    the old event log and before any new `Server` is live. In every
-   `ops.content` mode, `off` included, a `/submit` or `/messages` terminal
-   event goes to the city's live `Server`'s event log (its own `Server`'s when the supervisor dropped the city), whether
+   `ops.content` mode, `off` included, a session create, `/submit` or
+   `/messages` terminal event goes to the city's live `Server`'s event log
+   (its own `Server`'s when the supervisor dropped the city), whether
    or not its request was recorded, and one the log refuses is kept, in
    order, and recorded the next time a log takes it: when the
    supervisor builds the city's next `Server`, before the city's next
-   `/submit` or `/messages` terminal event, and before a same-key retry
-   of its request is answered, whether the `Idempotency-Key` cache, the
-   in-flight registry or the stored op answers it. While it cannot be
+   such terminal event, before a same-key retry of its request is
+   answered, whether the `Idempotency-Key` cache, the in-flight registry
+   or the stored op answers it, and when its outcome is looked up
+   (`GET /v0/city/{cityName}/request/{requestId}`). While it cannot be
    recorded, that retry gets 409 `in_flight` instead of a 202, and so
    does a replay whose re-emitted event the log refuses, so no retry is
-   answered 202 while its request's terminal event is kept. Nothing else
-   records it: a client that only watches the event stream, or whose 202
-   came before the log refused the event, does not see it until one of
-   those happens. A city keeps at most 1024 such events; past that it
+   answered 202 while its request's terminal event is kept; the lookup
+   answers `pending`. Nothing else records it: a client that only
+   watches the event stream, or whose 202 came before the log refused
+   the event, does not see it until one of those happens. A city keeps at most 1024 such events; past that it
    drops the oldest and logs it, and a dropped event is never recorded,
    so a client holding that request's 202 may never see its terminal
    event. Kept events live only in the API process: any it cannot record
@@ -411,10 +413,11 @@ is an enum identifying which operation failed.
 
 A client that misses the terminal event (a dropped stream, a supervisor
 restart) can read the outcome of a session create, message or submit
-request by its `request_id`:
+request by its `request_id`, passing the `event_cursor` of the same 202
+as `after_seq`:
 
 ```
-GET /v0/city/{cityName}/request/{requestId}
+GET /v0/city/{cityName}/request/{requestId}?after_seq={event_cursor}
 ```
 
 ```json
@@ -435,28 +438,38 @@ GET /v0/city/{cityName}/request/{requestId}
 
 | `state` | Meaning | `event` |
 |---------|---------|---------|
-| `pending` | The request is still running in the server that accepted it | absent |
+| `pending` | The request is still running in the server that accepted it, or its terminal event is kept until the event log takes it (request_id rule 9) | absent |
 | `succeeded` | Its `request.result.session.*` event was recorded | that event |
 | `failed` | Its `request.failed` event was recorded | that event |
 | `outcome_unknown` | The server that accepted the request stopped (or lost the terminal event) before recording an outcome; the operation may or may not have taken effect | absent |
 
 `event` is the terminal event exactly as `/v0/city/{cityName}/events`
 and the event stream deliver it, so a client decodes it with the same
-code. An id this city never accepted, or one whose events have aged out
-of the retained log, is a 404 `request-not-found`. With no event
-provider the lookup answers 503, as the stream does.
+code. An id this city did not accept after `after_seq`, or one whose
+events have aged out of the retained log, is a 404 `request-not-found`.
+A request without `after_seq`, or with one that is not an event
+sequence number, is a 422. With no event provider the lookup answers
+503, as the stream does.
 
 The outcome is derived from the persisted city event log, not from a
 second store. When it accepts a request the handler records a
 `request.accepted` marker (`{request_id, operation}`) before it returns
-the 202; the terminal event is the outcome. The lookup scans the log for
-the two events with that `request_id`, so the answer survives a missed
-event and a supervisor restart, and lasts as long as the log retains
-them. A process-wide in-flight registry separates the two cases with a
-marker and no terminal event: a request whose goroutine is still running
-is `pending`; one whose owner is gone is `outcome_unknown`. The registry
-is not per `Server`, because a city's `Server` is rebuilt when city
-state changes while its goroutines keep running.
+the 202; the terminal event is the outcome. Both follow the 202's
+`event_cursor`, so the lookup reads only the events after `after_seq`:
+an archive the log rotated out before it is never opened, and the
+active log is read from the cursor on, so a lookup costs the history
+since the request was accepted, not the city's whole retained history.
+Once its client disconnects, the lookup opens no further archive. It
+scans those events for the two with that `request_id`, so the answer
+survives a missed event and a supervisor restart, and lasts as long as
+the log retains them. A process-wide in-flight registry separates the
+cases with a marker and no terminal event: a request whose goroutine is
+still running is `pending`, and so is one whose terminal event the log
+refused and the city still keeps (request_id rule 9), which the lookup
+records first if the log takes it now; one whose owner is gone is
+`outcome_unknown`. The registry is not per `Server`, because a city's
+`Server` is rebuilt when city state changes while its goroutines keep
+running.
 
 If the marker cannot be recorded (no event provider, or the log refuses
 an acknowledged append) the request is refused with 503 before any work
@@ -504,7 +517,8 @@ giving clients real-time visibility into operation progress.
 5. On success, the payload contains the full typed result. A
    session-request client that lost the stream, or whose supervisor
    restarted, reads the outcome from
-   `GET /v0/city/{cityName}/request/{requestId}` instead of waiting.
+   `GET /v0/city/{cityName}/request/{requestId}?after_seq={event_cursor}`
+   instead of waiting.
 
    The server never invents a terminal event at a deadline for a request
    it did not record (rule 2). Like an unrecorded `session.submit`, an
@@ -513,10 +527,12 @@ giving clients real-time visibility into operation progress.
    takes. A deadline cannot tell a delivery that will never land from one
    about to land, so a `request.failed` emitted there would be false
    whenever the delivery later succeeded, and a client that retried on it
-   would deliver the message twice. The provider paths bound their own
-   waits. A delivery still in flight after four minutes (the CLI client's
-   wait) is logged with its request ID, and its result event follows when
-   the delivery finishes.
+   would deliver the message twice. Not every provider bounds a delivery:
+   a nudge to a k8s, herdr or ssh runtime sets no deadline of its own, so
+   a delivery to a wedged runtime stays `pending`, with no terminal event,
+   until the runtime answers. A delivery still in flight after four
+   minutes (the CLI client's wait) is logged with its request ID, and its
+   result event follows when the delivery finishes.
 
    A recorded `session.message` or `session.submit` (rule 2) is bounded
    inside its op's `finish_by`, `session.message` at four minutes and

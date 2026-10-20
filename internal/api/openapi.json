@@ -846,7 +846,7 @@
         "additionalProperties": false,
         "properties": {
           "event_cursor": {
-            "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.",
+            "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty.",
             "type": "string"
           },
           "idempotency_key": {
@@ -7929,7 +7929,7 @@
             "type": "string"
           },
           "state": {
-            "description": "pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.",
+            "description": "pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.",
             "enum": [
               "pending",
               "succeeded",
@@ -12766,7 +12766,7 @@
         "additionalProperties": false,
         "properties": {
           "ended_at": {
-            "description": "When the turn ended: the source's time, or the server's for an inferred end.",
+            "description": "When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again.",
             "format": "date-time",
             "type": "string"
           },
@@ -12790,7 +12790,6 @@
         },
         "required": [
           "id",
-          "ended_at",
           "inferred"
         ],
         "type": "object"
@@ -48018,7 +48017,7 @@
     },
     "/v0/city/{cityName}/request/{requestId}": {
       "get": {
-        "description": "Reads the outcome of a session create, message or submit request by the request_id its 202 returned, so a client that missed the request.result.* or request.failed event (a dropped stream, a supervisor restart) can still learn it. The outcome is derived from the persisted city event log: it survives a supervisor restart and lasts as long as the log retains the request's events. pending means the request is still running; succeeded and failed carry the terminal event exactly as the event stream delivered it; outcome_unknown means the server that accepted the request stopped before recording an outcome, so the operation may or may not have taken effect. An id that was never accepted by this city, or whose events have aged out of the log, is a 404 request-not-found.",
+        "description": "Reads the outcome of a session create, message or submit request by the request_id its 202 returned, so a client that missed the request.result.* or request.failed event (a dropped stream, a supervisor restart) can still learn it. after_seq is the event_cursor of the same 202: the outcome is derived from the persisted city event log after it, so it survives a supervisor restart and lasts as long as the log retains the request's events. pending means the request is still running, or its terminal event is held until the log takes it; succeeded and failed carry the terminal event exactly as the event stream delivered it; outcome_unknown means the server that accepted the request stopped before recording an outcome, so the operation may or may not have taken effect. An id this city did not accept after after_seq, or whose events have aged out of the log, is a 404 request-not-found.",
         "operationId": "get-request-outcome",
         "parameters": [
           {
@@ -48040,6 +48039,18 @@
             "required": true,
             "schema": {
               "description": "The request_id from an async session request's 202 response.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.",
+            "explode": false,
+            "in": "query",
+            "name": "after_seq",
+            "required": true,
+            "schema": {
+              "description": "The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.",
+              "pattern": "^[0-9]+$",
               "type": "string"
             }
           }
@@ -53914,7 +53925,7 @@
     },
     "/v0/city/{cityName}/session/{id}/turn": {
       "get": {
-        "description": "Reads the session's turn identity, read-only: where its turns are read from (source), how far that answer can be trusted (capabilities), and what one read saw now (observation, current, recent). A session whose turns cannot be identified answers 200 with source none and observation unsupported, never a 5xx; a source that cannot be read now answers 200 with observation unavailable, meaning its turns are unknown, not idle. A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop interrupts the turn its turn field names, or whatever turn is current when it names none.",
+        "description": "Reads the session's turn identity, read-only: where its turns are read from (source), how far that answer can be trusted (capabilities), and what one read saw now (observation, current, recent). A session whose turns cannot be identified answers 200 with source none and observation unsupported, never a 5xx; a source that cannot be read now answers 200 with observation unavailable, meaning its turns are unknown, not idle. An open session that no runtime is bound to runs no turn: it answers observed with no current turn, as POST /session/{id}/stop reads it. A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop interrupts the turn its turn field names, or whatever turn is current when it names none.",
         "operationId": "get-v0-city-by-city-name-session-by-id-turn",
         "parameters": [
           {

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,9 +35,11 @@ type requestOutcomeWire struct {
 	} `json:"event"`
 }
 
-func getRequestOutcome(t *testing.T, h http.Handler, state State, requestID string) *httptest.ResponseRecorder {
+// getRequestOutcome reads requestID's outcome from the events after afterSeq,
+// the event_cursor of the request's 202 as a client passes it.
+func getRequestOutcome(t *testing.T, h http.Handler, state State, requestID, afterSeq string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/request/")+requestID, nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/request/")+requestID+"?after_seq="+url.QueryEscape(afterSeq), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -113,7 +117,7 @@ func TestRequestOutcomeReportsSucceededSubmitWithEventPayload(t *testing.T) {
 	}
 	want := terminalEventFor(t, fs.eventProv, events.RequestResultSessionSubmit, accepted.RequestID)
 
-	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID))
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor))
 	if out.RequestID != accepted.RequestID || out.Operation != RequestOperationSessionSubmit || out.State != "succeeded" {
 		t.Fatalf("outcome = %+v, want succeeded session.submit for %s", out, accepted.RequestID)
 	}
@@ -142,7 +146,7 @@ func TestRequestOutcomeReportsFailedSubmitWithFailurePayload(t *testing.T) {
 	waitForRequestFailed(t, fs.eventProv, accepted.RequestID)
 	want := terminalEventFor(t, fs.eventProv, events.RequestFailed, accepted.RequestID)
 
-	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID))
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor))
 	if out.Operation != RequestOperationSessionSubmit || out.State != "failed" {
 		t.Fatalf("outcome = %+v, want failed session.submit", out)
 	}
@@ -176,7 +180,7 @@ func TestRequestOutcomeReportsPendingWhileInFlight(t *testing.T) {
 		t.Fatal("provider nudge was not reached")
 	}
 
-	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID))
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor))
 	if out.Operation != RequestOperationSessionMessage || out.State != "pending" || out.Event != nil {
 		t.Fatalf("in-flight outcome = %+v, want pending session.message with no event", out)
 	}
@@ -185,7 +189,7 @@ func TestRequestOutcomeReportsPendingWhileInFlight(t *testing.T) {
 	if success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID); success == nil {
 		t.Fatalf("message failed: %+v", failure)
 	}
-	out = decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID))
+	out = decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor))
 	if out.State != "succeeded" || out.Event == nil || out.Event.Type != events.RequestResultSessionMessage {
 		t.Fatalf("finished outcome = %+v, want succeeded with request.result.session.message", out)
 	}
@@ -197,7 +201,7 @@ func TestRequestOutcomeUnknownIDIsRequestNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	rec := getRequestOutcome(t, h, fs, "req-000000000000000000000000")
+	rec := getRequestOutcome(t, h, fs, "req-000000000000000000000000", "0")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
 	}
@@ -247,7 +251,7 @@ func TestRequestOutcomeSurvivesEventProviderReopen(t *testing.T) {
 	fs.eventProv = reopened
 	h2 := newTestCityHandlerWith(t, fs, New(fs))
 
-	out := decodeRequestOutcome(t, getRequestOutcome(t, h2, fs, accepted.RequestID))
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h2, fs, accepted.RequestID, accepted.EventCursor))
 	if out.State != "succeeded" || out.Event == nil || out.Event.Seq != want.Seq {
 		t.Fatalf("outcome after reopen = %+v, want succeeded at seq %d", out, want.Seq)
 	}
@@ -268,7 +272,7 @@ func TestRequestOutcomeReportsOutcomeUnknownForOrphanedRequest(t *testing.T) {
 		Payload: json.RawMessage(`{"request_id":"` + orphan + `","operation":"session.submit"}`),
 	})
 
-	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, orphan))
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, orphan, "0"))
 	if out.RequestID != orphan || out.Operation != RequestOperationSessionSubmit || out.State != "outcome_unknown" || out.Event != nil {
 		t.Fatalf("orphaned outcome = %+v, want outcome_unknown session.submit with no event", out)
 	}
@@ -311,5 +315,183 @@ func TestSessionSubmitRefusedWhenAcceptanceCannotBeRecorded(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The lookup reads the events after the cursor the request's 202 returned, so
+// it is refused, 422, without one or with one that is not an event sequence
+// number, rather than answered from a scan of the whole retained log.
+func TestRequestOutcomeRequiresTheAcceptanceCursor(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+	for name, query := range map[string]string{
+		"no cursor":           "",
+		"empty cursor":        "?after_seq=",
+		"not a sequence":      "?after_seq=latest",
+		"past the seq domain": "?after_seq=18446744073709551616",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(fs, "/request/")+"req-000000000000000000000000"+query, nil))
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422; body: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// A request's events all follow its 202's cursor, so the lookup never opens an
+// archive the log rotated out before it. The archive here is corrupt: the
+// control read from the log's start opens it and fails.
+func TestRequestOutcomeOpensNoArchiveBeforeTheCursor(t *testing.T) {
+	fs := newSessionFakeState(t)
+	dir := t.TempDir()
+	log, err := events.NewFileRecorder(filepath.Join(dir, "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	for range 20 {
+		log.Record(events.Event{Type: events.SessionWoke, Actor: "test", Subject: "history"})
+	}
+	rotated, err := log.ForceRotate()
+	if err != nil || !rotated.Rotated {
+		t.Fatalf("ForceRotate = %+v, %v; want a rotation", rotated, err)
+	}
+	<-rotated.Done
+	fs.eventProv = log
+	h := newTestCityHandler(t, fs)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Rotated")
+
+	rec := postSubmit(t, h, fs, info.ID, `{"message":"later please","intent":"follow_up"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	if success, failure := waitForSessionSubmitResult(t, log, accepted.RequestID); success == nil {
+		t.Fatalf("submit failed: %+v", failure)
+	}
+	want := terminalEventFor(t, log, events.RequestResultSessionSubmit, accepted.RequestID)
+	archives, err := filepath.Glob(filepath.Join(dir, "events.jsonl.archive-*.gz"))
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("archives = %v (%v), want the one rotated before the request", archives, err)
+	}
+	if err := os.WriteFile(archives[0], []byte("not a gzip stream"), 0o644); err != nil {
+		t.Fatalf("corrupt the archive: %v", err)
+	}
+
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor))
+	if out.State != "succeeded" || out.Event == nil || out.Event.Seq != want.Seq {
+		t.Fatalf("outcome = %+v, want succeeded at seq %d", out, want.Seq)
+	}
+	if control := getRequestOutcome(t, h, fs, accepted.RequestID, "0"); control.Code != http.StatusInternalServerError {
+		t.Fatalf("read from the log's start = %d, want 500 from the corrupt archive; body: %s", control.Code, control.Body.String())
+	}
+}
+
+// requestFinished waits until requestID's goroutine has left the in-flight
+// registry, so the lookup can no longer answer pending from it.
+func requestFinished(t *testing.T, state State, requestID string) {
+	t.Helper()
+	waitFor(t, testEventTimeout, "request "+requestID+" leaves the in-flight registry", func() bool {
+		_, running := asyncRequestsInFlight.Load(asyncRequestKey{cityPath: state.CityPath(), requestID: requestID})
+		return !running
+	})
+}
+
+// A request whose terminal event the event log refused is kept by its city
+// until a log takes it (session_ops.go), so its outcome is held, not lost:
+// the lookup answers pending while the event is kept, never outcome_unknown,
+// which tells a client to inspect and maybe resend a message that was
+// delivered. Once the log takes events, the lookup records the kept event and
+// answers it.
+func TestRequestOutcomeIsPendingWhileItsTerminalEventIsKept(t *testing.T) {
+	for _, tc := range []struct{ endpoint, event string }{
+		{"/submit", events.RequestResultSessionSubmit},
+		{"/messages", events.RequestResultSessionMessage},
+	} {
+		t.Run(strings.TrimPrefix(tc.endpoint, "/"), func(t *testing.T) {
+			e := newOpsEnv(t, "")
+			cityLog := events.NewFake()
+			live := &closableEvents{Fake: cityLog}
+			e.fs.eventProv = live
+			info := e.session(t, "Kept outcome")
+			gp, release := e.gatedProvider(t)
+			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+tc.endpoint, "", `{"message":"once"}`).Body)
+			gp.waitEntered(t)
+			live.closed.Store(true)
+			release()
+			waitFor(t, testEventTimeout, "the event log refuses the terminal event", func() bool {
+				return len(terminalEventsOf(live.refusedEvents(), first.RequestID)) == 1
+			})
+			requestFinished(t, e.fs, first.RequestID)
+
+			if out := decodeRequestOutcome(t, getRequestOutcome(t, e.h, e.fs, first.RequestID, first.EventCursor)); out.State != "pending" || out.Event != nil {
+				t.Fatalf("outcome while the terminal event is kept = %+v, want pending with no event", out)
+			}
+
+			live.closed.Store(false)
+			out := decodeRequestOutcome(t, getRequestOutcome(t, e.h, e.fs, first.RequestID, first.EventCursor))
+			recorded := terminalEvents(t, cityLog, first.RequestID)
+			if len(recorded) != 1 || recorded[0].Type != tc.event {
+				t.Fatalf("recorded terminal events = %+v, want the kept %s", recorded, tc.event)
+			}
+			if out.State != "succeeded" || out.Event == nil || out.Event.Seq != recorded[0].Seq {
+				t.Fatalf("outcome once the log takes events = %+v, want succeeded at seq %d", out, recorded[0].Seq)
+			}
+		})
+	}
+}
+
+// A session create's terminal event is kept like a message's when the event
+// log refuses it, so its lookup answers pending until a log takes the event,
+// and then the create's outcome, instead of losing the outcome for good.
+func TestRequestOutcomeKeepsARefusedSessionCreateResult(t *testing.T) {
+	fs := newSessionFakeState(t)
+	cityLog := events.NewFake()
+	live := &closableEvents{Fake: cityLog}
+	fs.eventProv = live
+	state := &gatedCommandableState{fakeState: fs, release: make(chan struct{})}
+	h := newTestCityHandlerWith(t, state, New(state))
+
+	rec := postSessionAction(t, h, cityURL(fs, "/sessions"), "", `{"kind":"agent","name":"myrig/worker","async":true}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	createResults := func(evs []events.Event) int {
+		n := 0
+		for _, e := range evs {
+			var p struct {
+				RequestID string `json:"request_id"`
+			}
+			if e.Type == events.RequestResultSessionCreate && json.Unmarshal(e.Payload, &p) == nil && p.RequestID == accepted.RequestID {
+				n++
+			}
+		}
+		return n
+	}
+	live.closed.Store(true)
+	close(state.release)
+	waitFor(t, testEventTimeout, "the event log refuses the create's result", func() bool {
+		return createResults(live.refusedEvents()) == 1
+	})
+	requestFinished(t, fs, accepted.RequestID)
+
+	if out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor)); out.Operation != RequestOperationSessionCreate || out.State != "pending" {
+		t.Fatalf("outcome while the create's result is kept = %+v, want pending session.create", out)
+	}
+
+	live.closed.Store(false)
+	out := decodeRequestOutcome(t, getRequestOutcome(t, h, fs, accepted.RequestID, accepted.EventCursor))
+	if out.State != "succeeded" || out.Event == nil || out.Event.Type != events.RequestResultSessionCreate {
+		t.Fatalf("outcome once the log takes events = %+v, want succeeded with request.result.session.create", out)
+	}
+	recorded, err := cityLog.List(events.Filter{Type: events.RequestResultSessionCreate})
+	if err != nil {
+		t.Fatalf("list create results: %v", err)
+	}
+	if got := createResults(recorded); got != 1 {
+		t.Fatalf("recorded create results = %d, want the kept one", got)
 	}
 }

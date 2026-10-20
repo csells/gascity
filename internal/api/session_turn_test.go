@@ -50,7 +50,7 @@ type sessionTurnWire struct {
 	Recent []struct {
 		ID        string     `json:"id"`
 		StartedAt *time.Time `json:"started_at"`
-		EndedAt   time.Time  `json:"ended_at"`
+		EndedAt   *time.Time `json:"ended_at"`
 		Status    string     `json:"status"`
 		Inferred  bool       `json:"inferred"`
 	} `json:"recent"`
@@ -165,7 +165,7 @@ func TestSessionTurnTranscriptTierReportsCurrentAndRecentTurns(t *testing.T) {
 	if r.ID != turnTestEnded || r.Status != "completed" || r.Inferred {
 		t.Fatalf("recent[0] = %+v, want %s completed, recorded", r, turnTestEnded)
 	}
-	if want := time.Date(2026, 10, 13, 5, 0, 5, 456_000_000, time.UTC); !r.EndedAt.Equal(want) {
+	if want := time.Date(2026, 10, 13, 5, 0, 5, 456_000_000, time.UTC); r.EndedAt == nil || !r.EndedAt.Equal(want) {
 		t.Fatalf("recent[0].ended_at = %v, want %v", r.EndedAt, want)
 	}
 }
@@ -256,6 +256,92 @@ func TestSessionTurnWithoutSourceIsUnsupported(t *testing.T) {
 	}
 	if got.Current != nil || len(got.Recent) != 0 {
 		t.Fatalf("unsupported read reported turns: current %+v recent %+v", got.Current, got.Recent)
+	}
+}
+
+// newTurnTestProtocolSession creates a session whose runtime observes its
+// turns itself, as ACP and t3bridge do: its turn reads answer from fs.sp's
+// TurnHistoryScripts and TurnHistoryErrors.
+func newTurnTestProtocolSession(t *testing.T) (*fakeState, *Server, session.Info) {
+	t.Helper()
+	fs := newSessionFakeState(t)
+	fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	fs.sessionProvider = runtime.FullFake{Fake: fs.sp}
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Protocol turns")
+	fs.sp.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{info.SessionName: {{
+		Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact,
+	}}}
+	fs.sp.TurnHistoryScripts = map[string][]runtime.TurnHistory{}
+	fs.sp.TurnHistoryErrors = map[string][]error{}
+	return fs, New(fs), info
+}
+
+// An open session that no runtime is bound to, on a protocol turn source (an
+// ACP session with no control socket or a closed connection, a t3bridge
+// session with no thread), runs no turn: its read answers 200 observed with no
+// current turn, as /stop reads it, never the 404 a closed session gets, which
+// would tell a client fencing a stop on this read that the session is gone.
+func TestSessionTurnProtocolSourceWithNoRuntimeBoundRunsNoTurn(t *testing.T) {
+	for name, err := range map[string]error{
+		"acp with no control socket": fmt.Errorf("%w: no ACP control socket for %q", runtime.ErrSessionNotFound, "s"),
+		"acp connection closed":      fmt.Errorf("%w: ACP session %q connection closed", runtime.ErrSessionNotFound, "s"),
+		"t3bridge with no thread":    fmt.Errorf("%w: no t3 thread is bound to %q", runtime.ErrSessionNotFound, "s"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs, srv, info := newTurnTestProtocolSession(t)
+			fs.sp.TurnHistoryErrors[info.SessionName] = []error{err}
+
+			got := decodeSessionTurn(t, getSessionTurn(t, fs, srv, info.ID))
+
+			if got.SessionID != info.ID || got.Source != "protocol" || got.Observation != "observed" || got.ObservedAt == nil {
+				t.Fatalf("session_id/source/observation = %q/%q/%q (observed_at %v, detail %q), want %s/protocol/observed", got.SessionID, got.Source, got.Observation, got.ObservedAt, got.Detail, info.ID)
+			}
+			if got.Current != nil || len(got.Recent) != 0 {
+				t.Fatalf("turns = current %+v recent %+v, want none: no runtime runs the session", got.Current, got.Recent)
+			}
+		})
+	}
+}
+
+// A closed session is 404, also on a protocol turn source, whose runtime
+// reports a session it does not run in the same terms.
+func TestSessionTurnClosedSessionIsNotFound(t *testing.T) {
+	fs, srv, info := newTurnTestProtocolSession(t)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	rec := getSessionTurn(t, fs, srv, info.ID)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET closed session turn = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	var problem apierr.ErrorModel
+	if err := json.Unmarshal(rec.Body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode problem: %v (%s)", err, rec.Body.String())
+	}
+	if problem.Code != apierr.SessionNotFound.Code {
+		t.Fatalf("problem code = %q, want %q: %s", problem.Code, apierr.SessionNotFound.Code, rec.Body.String())
+	}
+}
+
+// A turn the source saw end without an end time carries no ended_at, as one
+// without a start time carries no started_at, never the zero time.
+func TestSessionTurnOmitsAnUnknownEndTime(t *testing.T) {
+	fs, srv, info := newTurnTestProtocolSession(t)
+	fs.sp.TurnHistoryScripts[info.SessionName] = []runtime.TurnHistory{{
+		Recent: []runtime.EndedTurn{{TurnID: turnTestEnded, Status: runtime.TurnStatusCompleted}},
+	}}
+
+	rec := getSessionTurn(t, fs, srv, info.ID)
+	got := decodeSessionTurn(t, rec)
+
+	if len(got.Recent) != 1 || got.Recent[0].ID != turnTestEnded || got.Recent[0].Status != "completed" {
+		t.Fatalf("recent = %+v, want %s completed", got.Recent, turnTestEnded)
+	}
+	if strings.Contains(rec.Body.String(), "ended_at") {
+		t.Fatalf("turn with no end time carries ended_at: %s", rec.Body.String())
 	}
 }
 

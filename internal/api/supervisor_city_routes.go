@@ -394,7 +394,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}/turn", (*Server).humaHandleSessionTurn, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Reads the session's turn identity, read-only: where its turns are read from (source), how far that answer can be trusted (capabilities), and what one read saw now (observation, current, recent). "+
 			"A session whose turns cannot be identified answers 200 with source none and observation unsupported, never a 5xx; a source that cannot be read now answers 200 with observation unavailable, meaning its turns are unknown, not idle. "+
-			"A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop interrupts the turn its turn field names, or whatever turn is current when it names none."))
+			"An open session that no runtime is bound to runs no turn: it answers observed with no current turn, as POST /session/{id}/stop reads it. A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop interrupts the turn its turn field names, or whatever turn is current when it names none."))
 	cityGet(sm, "/pending", (*Server).humaHandleCityPending, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
@@ -421,10 +421,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:     "Get the outcome of an async session request",
 		Description: "Reads the outcome of a session create, message or submit request by the request_id its 202 returned, " +
 			"so a client that missed the request.result.* or request.failed event (a dropped stream, a supervisor restart) can still learn it. " +
-			"The outcome is derived from the persisted city event log: it survives a supervisor restart and lasts as long as the log retains the request's events. " +
-			"pending means the request is still running; succeeded and failed carry the terminal event exactly as the event stream delivered it; " +
+			"after_seq is the event_cursor of the same 202: the outcome is derived from the persisted city event log after it, so it survives a supervisor restart and lasts as long as the log retains the request's events. " +
+			"pending means the request is still running, or its terminal event is held until the log takes it; succeeded and failed carry the terminal event exactly as the event stream delivered it; " +
 			"outcome_unknown means the server that accepted the request stopped before recording an outcome, so the operation may or may not have taken effect. " +
-			"An id that was never accepted by this city, or whose events have aged out of the log, is a 404 request-not-found.",
+			"An id this city did not accept after after_seq, or whose events have aged out of the log, is a 404 request-not-found.",
 		Errors: []int{http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleRequestOutcome)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))

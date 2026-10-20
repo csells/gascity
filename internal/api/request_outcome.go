@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -60,7 +61,7 @@ var asyncRequestsInFlight sync.Map
 // before any work starts: a 202 must never hand out an id nothing can resolve.
 //
 // The caller runs finish when its goroutine exits, after the terminal event has
-// been recorded.
+// been emitted.
 func (s *Server) acceptAsyncRequest(operation string) (requestID, eventCursor string, finish func(), err error) {
 	ep, err := s.asyncRequestEventLog()
 	if err != nil {
@@ -100,7 +101,7 @@ func (s *Server) asyncRequestEventLog() (events.Recorder, error) {
 // operation journal records them, record it once admitted (acceptMessageOp).
 //
 // The caller runs finish when its goroutine exits, after the terminal event has
-// been recorded.
+// been emitted.
 func (s *Server) recordAsyncAcceptance(ep events.Recorder, requestID, operation string) (finish func(), err error) {
 	key := asyncRequestKey{cityPath: s.state.CityPath(), requestID: requestID}
 	// Register before recording: a lookup that finds the marker must also find
@@ -134,13 +135,14 @@ func recordRequestAccepted(ep events.Recorder, requestID, operation string) erro
 type RequestOutcomeInput struct {
 	CityScope
 	RequestID string `path:"requestId" doc:"The request_id from an async session request's 202 response."`
+	AfterSeq  string `query:"after_seq" required:"true" pattern:"^[0-9]+$" doc:"The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it."`
 }
 
 // RequestOutcome is the outcome of one async session request.
 type RequestOutcome struct {
 	RequestID string     `json:"request_id" doc:"The request_id from the 202 response."`
 	Operation string     `json:"operation" enum:"session.create,session.message,session.submit" doc:"The operation that was accepted."`
-	State     string     `json:"state" enum:"pending,succeeded,failed,outcome_unknown" doc:"pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying."`
+	State     string     `json:"state" enum:"pending,succeeded,failed,outcome_unknown" doc:"pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying."`
 	Event     *WireEvent `json:"event,omitempty" doc:"The terminal event exactly as /v0/city/{cityName}/events and the event stream deliver it: request.result.session.* for succeeded, request.failed for failed. Absent while pending and for outcome_unknown."`
 }
 
@@ -151,52 +153,86 @@ type RequestOutcomeOutput struct {
 
 // humaHandleRequestOutcome is the Huma-typed handler for
 // GET /v0/city/{cityName}/request/{requestId}.
-func (s *Server) humaHandleRequestOutcome(_ context.Context, input *RequestOutcomeInput) (*RequestOutcomeOutput, error) {
-	out, err := s.lookupRequestOutcome(input.RequestID)
+func (s *Server) humaHandleRequestOutcome(ctx context.Context, input *RequestOutcomeInput) (*RequestOutcomeOutput, error) {
+	afterSeq, err := strconv.ParseUint(input.AfterSeq, 10, 64)
+	if err != nil {
+		return nil, apierr.ValidationFailed.Msg(fmt.Sprintf("after_seq %q is not an event sequence number: pass the event_cursor of the request's 202 response", input.AfterSeq))
+	}
+	out, err := s.lookupRequestOutcome(ctx, input.RequestID, afterSeq)
 	if err != nil {
 		return nil, err
 	}
 	return &RequestOutcomeOutput{Body: out}, nil
 }
 
-// lookupRequestOutcome derives a request's outcome from the city event log, the
-// same persisted log the event stream serves, so the answer survives a missed
-// event and a supervisor restart without a second store. The in-flight
-// registry only separates pending from outcome_unknown.
-func (s *Server) lookupRequestOutcome(requestID string) (RequestOutcome, error) {
+// lookupRequestOutcome derives a request's outcome from the city event log
+// after afterSeq, the same persisted log the event stream serves, so the
+// answer survives a missed event and a supervisor restart without a second
+// store. The in-flight registry and the city's kept terminal events only
+// separate pending from outcome_unknown.
+func (s *Server) lookupRequestOutcome(ctx context.Context, requestID string, afterSeq uint64) (RequestOutcome, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
 		return RequestOutcome{}, apierr.ServiceUnavailable.Msg("events not enabled")
 	}
 	requestID = strings.TrimSpace(requestID)
-	// Read the registry before the log. The goroutine records its terminal
+	// Read the registry before the log. The goroutine emits its terminal
 	// event before it leaves the registry, so a request seen in flight here
 	// either shows its terminal event below or is still pending, and one not
-	// in flight has already recorded whatever terminal event it will.
+	// in flight has emitted whatever terminal event it will: recorded, kept
+	// by its city because the log refused it, or lost.
 	inFlightOp, inFlight := asyncRequestsInFlight.Load(asyncRequestKey{cityPath: s.state.CityPath(), requestID: requestID})
+	out, err := readRequestOutcome(ctx, ep, requestID, afterSeq)
+	switch {
+	case err != nil, out.State != "":
+		return out, err
+	case inFlight:
+		if out.Operation == "" {
+			out.Operation, _ = inFlightOp.(string)
+		}
+		out.State = RequestStatePending
+		return out, nil
+	case out.Operation == "":
+		return RequestOutcome{}, apierr.RequestNotFound.Msg(fmt.Sprintf("request %q not found: no async session request with this id is in the retained city event log after seq %d", requestID, afterSeq))
+	}
+	// An accepted request whose goroutine has finished with no terminal event
+	// in the log may have one kept, the log having refused it. The kept events
+	// are recorded now if the log takes them; one it still refuses is held,
+	// so the request is pending, not outcome_unknown, which would invite a
+	// duplicate resend. One recorded now, by this flush or a concurrent one,
+	// is read again.
+	if s.ops != nil {
+		if s.ops.city.flushKeeps(s, requestID) {
+			out.State = RequestStatePending
+			return out, nil
+		}
+		if again, err := readRequestOutcome(ctx, ep, requestID, afterSeq); err != nil || again.State != "" {
+			return again, err
+		}
+	}
+	out.State = RequestStateOutcomeUnknown
+	return out, nil
+}
 
-	filter := events.Filter{Types: []string{
+// readRequestOutcome scans ep's events after afterSeq for requestID's
+// request.accepted marker and its first terminal event. The outcome carries the
+// operation the events name, and a State and Event only when it found the
+// terminal event.
+func readRequestOutcome(ctx context.Context, ep events.Provider, requestID string, afterSeq uint64) (RequestOutcome, error) {
+	filter := events.Filter{AfterSeq: afterSeq, Types: []string{
 		events.RequestAccepted,
 		events.RequestResultSessionCreate,
 		events.RequestResultSessionMessage,
 		events.RequestResultSessionSubmit,
 		events.RequestFailed,
 	}}
-	var evts []events.Event
-	var err error
-	if ifp, ok := ep.(events.InFlightProvider); ok {
-		evts, err = ifp.ListInFlight(filter)
-	} else {
-		evts, err = ep.List(filter)
-	}
+	evts, err := listRequestEvents(ctx, ep, filter)
 	if err != nil {
 		return RequestOutcome{}, apierr.Internal.Msg(fmt.Sprintf("reading city event log: %v", err))
 	}
 
 	out := RequestOutcome{RequestID: requestID}
-	var terminal *events.Event
-	for i := range evts {
-		e := evts[i]
+	for _, e := range evts {
 		var p struct {
 			RequestID string `json:"request_id"`
 			Operation string `json:"operation"`
@@ -220,28 +256,22 @@ func (s *Server) lookupRequestOutcome(requestID string) (RequestOutcome, error) 
 			out.Operation = sessionRequestResultOperations[e.Type]
 			out.State = RequestStateSucceeded
 		}
-		terminal = &e
-		break
-	}
-
-	if terminal != nil {
-		wire, ok := toWireEvent(*terminal)
+		wire, ok := toWireEvent(e)
 		if !ok {
-			return RequestOutcome{}, apierr.Internal.Msg(fmt.Sprintf("decoding %s event seq %d", terminal.Type, terminal.Seq))
+			return RequestOutcome{}, apierr.Internal.Msg(fmt.Sprintf("decoding %s event seq %d", e.Type, e.Seq))
 		}
 		out.Event = &wire
 		return out, nil
 	}
-	if inFlight {
-		if out.Operation == "" {
-			out.Operation, _ = inFlightOp.(string)
-		}
-		out.State = RequestStatePending
-		return out, nil
+	return out, nil
+}
+
+// listRequestEvents reads filter's events for the outcome lookup, folding in a
+// segment still in flight in a rotation (listWithInFlight), and stops once
+// ctx is done when the provider can.
+func listRequestEvents(ctx context.Context, ep events.Provider, filter events.Filter) ([]events.Event, error) {
+	if cp, ok := ep.(events.InFlightContextProvider); ok {
+		return cp.ListInFlightContext(ctx, filter)
 	}
-	if out.Operation != "" {
-		out.State = RequestStateOutcomeUnknown
-		return out, nil
-	}
-	return RequestOutcome{}, apierr.RequestNotFound.Msg(fmt.Sprintf("request %q not found: no async session request with this id is in the retained city event log", requestID))
+	return listWithInFlight(ep, filter)
 }

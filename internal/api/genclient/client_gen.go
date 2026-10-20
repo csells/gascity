@@ -1976,7 +1976,7 @@ type AnnotatedProviderResponse struct {
 
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
 type AsyncAcceptedBody struct {
-	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty.
 	EventCursor string `json:"event_cursor"`
 
 	// IdempotencyKey The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.
@@ -4629,14 +4629,14 @@ type RequestOutcome struct {
 	// RequestId The request_id from the 202 response.
 	RequestId string `json:"request_id"`
 
-	// State pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+	// State pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
 	State RequestOutcomeState `json:"state"`
 }
 
 // RequestOutcomeOperation The operation that was accepted.
 type RequestOutcomeOperation string
 
-// RequestOutcomeState pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+// RequestOutcomeState pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
 type RequestOutcomeState string
 
 // RigActionBody defines model for RigActionBody.
@@ -6398,8 +6398,8 @@ type SessionTurnCurrent struct {
 
 // SessionTurnEnded defines model for SessionTurnEnded.
 type SessionTurnEnded struct {
-	// EndedAt When the turn ended: the source's time, or the server's for an inferred end.
-	EndedAt time.Time `json:"ended_at"`
+	// EndedAt When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again.
+	EndedAt *time.Time `json:"ended_at,omitempty"`
 
 	// Id The turn's id, as the source records it. Opaque; compare for equality only.
 	Id string `json:"id"`
@@ -12312,6 +12312,12 @@ type GetV0CityByCityNameReadinessParams struct {
 
 	// Fresh Force fresh probe, bypassing cache.
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
+}
+
+// GetRequestOutcomeParams defines parameters for GetRequestOutcome.
+type GetRequestOutcomeParams struct {
+	// AfterSeq The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.
+	AfterSeq string `form:"after_seq" json:"after_seq"`
 }
 
 // DeleteV0CityByCityNameRigByNameParams defines parameters for DeleteV0CityByCityNameRigByName.
@@ -24258,7 +24264,7 @@ type ClientInterface interface {
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetRequestOutcome request
-	GetRequestOutcome(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetRequestOutcome(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameRigByName request
 	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -26288,8 +26294,8 @@ func (c *Client) GetV0CityByCityNameReadiness(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetRequestOutcome(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetRequestOutcomeRequest(c.Server, cityName, requestId)
+func (c *Client) GetRequestOutcome(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRequestOutcomeRequest(c.Server, cityName, requestId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -34637,7 +34643,7 @@ func NewGetV0CityByCityNameReadinessRequest(server string, cityName string, para
 }
 
 // NewGetRequestOutcomeRequest generates requests for GetRequestOutcome
-func NewGetRequestOutcomeRequest(server string, cityName string, requestId string) (*http.Request, error) {
+func NewGetRequestOutcomeRequest(server string, cityName string, requestId string, params *GetRequestOutcomeParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -34667,6 +34673,24 @@ func NewGetRequestOutcomeRequest(server string, cityName string, requestId strin
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after_seq", params.AfterSeq, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -38912,7 +38936,7 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
 
 	// GetRequestOutcomeWithResponse request
-	GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error)
+	GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error)
 
 	// DeleteV0CityByCityNameRigByNameWithResponse request
 	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
@@ -45203,8 +45227,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameReadinessWithResponse(ctx conte
 }
 
 // GetRequestOutcomeWithResponse request returning *GetRequestOutcomeResponse
-func (c *ClientWithResponses) GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error) {
-	rsp, err := c.GetRequestOutcome(ctx, cityName, requestId, reqEditors...)
+func (c *ClientWithResponses) GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error) {
+	rsp, err := c.GetRequestOutcome(ctx, cityName, requestId, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

@@ -291,11 +291,20 @@ func (h *SessionHandle) turnSession(id string) (sessionpkg.Info, error) {
 // runtime.ErrSessionNotFound; any other failure is
 // runtime.ErrRuntimeUnavailable, the read's answer unknown.
 func turnRowError(id string, err error) error {
-	if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) ||
-		errors.Is(err, sessionpkg.ErrNotSession) || errors.Is(err, sessionpkg.ErrSessionClosed) {
+	if TurnSessionGone(err) {
 		return fmt.Errorf("turns of session %s: %w: %w", id, runtime.ErrSessionNotFound, err)
 	}
 	return fmt.Errorf("turns of session %s: %w: %w", id, runtime.ErrRuntimeUnavailable, err)
+}
+
+// TurnSessionGone reports whether a turn read failed because its session's
+// row is gone, closed or not a session (turnRowError). A runtime that reports
+// runtime.ErrSessionNotFound on its own, as a protocol source does when no
+// runtime is bound to the session, says nothing about the row: the session
+// can be open.
+func TurnSessionGone(err error) bool {
+	return errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) ||
+		errors.Is(err, sessionpkg.ErrNotSession) || errors.Is(err, sessionpkg.ErrSessionClosed)
 }
 
 // conversationTranscript resolves the transcript of info's current

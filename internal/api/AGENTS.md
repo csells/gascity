@@ -118,22 +118,25 @@ registry, the degrade reporter, the kept terminal events and the city's live
 replaces, so a same-key retry still finds a replaced `Server`'s running
 delivery, and that delivery a live `Server` to report through.
 
-In every `ops.content` mode, `off` included, a delivery records its terminal
-event to the city's live `Server`'s event log (`emitMessageResult`), and a
-recorded one closes its op through that `Server`'s store (`openOpStore`); its
-own `Server` serves only when the city has no live `Server` (the supervisor
-dropped it). An event the log refuses is kept, in order, and recorded when the
-supervisor publishes the city's next `Server`, before the city's next terminal
-event, and before a same-key retry of its request is answered. Three points
-answer such a retry: the `Idempotency-Key` LRU (`withMessageIdempotency`), the
-in-flight registry and the stored op (`replayAnswer`). Each records the kept
-events first and answers 409 `in_flight` while the retry's event stays kept,
-so no 202 goes out without its terminal event after its cursor. A new answer
-point must do the same. The stored op's replay then re-emits its event unless
-the log just took a kept one of its request, endpoint and type, which is after
-its cursor too (`cityOps.emitReplay`); one for the other endpoint, whose
-waiter would never match it, does not stand in for it.
-`engdocs/design/async-request-result.md` rules 8 and 9 are the client
+In every `ops.content` mode, `off` included, a delivery, and a session create,
+records its terminal event to the city's live `Server`'s event log
+(`emitSessionRequestResult`), and a recorded delivery closes its op through
+that `Server`'s store (`openOpStore`); its own `Server` serves only when the
+city has no live `Server` (the supervisor dropped it). An event the log
+refuses is kept, in order, and recorded when the supervisor publishes the
+city's next `Server`, before the city's next terminal event, and before a
+same-key retry of its request is answered. Three points answer such a retry:
+the `Idempotency-Key` LRU (`withMessageIdempotency`), the in-flight registry
+and the stored op (`replayAnswer`). Each records the kept events first and
+answers 409 `in_flight` while the retry's event stays kept, so no 202 goes out
+without its terminal event after its cursor. A new answer point must do the
+same. The outcome lookup (`lookupRequestOutcome`) records the kept events too
+before it answers `outcome_unknown`, and answers `pending` while the request's
+event stays kept: a kept outcome is held, not lost. The stored op's replay
+then re-emits its event unless the log just took a kept one of its request,
+endpoint and type, which is after its cursor too (`cityOps.emitReplay`); one
+for the other endpoint, whose waiter would never match it, does not stand in
+for it. `engdocs/design/async-request-result.md` rules 8 and 9 are the client
 contract.
 
 The city's terminal events serialize on one lock, `cityOps.emitMu`, held
